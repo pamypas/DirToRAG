@@ -13,7 +13,7 @@ from models_loader import load_models_config
 from embedder import get_embeddings
 
 QDRANT_URL = "http://192.168.1.242:6333"
-COLLECTION_NAME = "puppet_repo_chunks"
+COLLECTION_NAME = "repo_chunks"
 
 # use Uvicorn / FastAPI logger
 logger = logging.getLogger("uvicorn.error")

@@ -8,7 +8,7 @@ from qdrant_client.http import models as qmodels
 from embedder import get_embeddings
 
 QDRANT_URL = "http://192.168.1.242:6333"
-COLLECTION_NAME = "puppet_repo_chunks"
+COLLECTION_NAME = "repo_chunks"
 
 # простое разбиение на chunk'и по символам
 CHUNK_SIZE = 1500
