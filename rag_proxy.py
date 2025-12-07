@@ -12,7 +12,7 @@ from qdrant_client import QdrantClient
 from models_loader import load_models_config
 from embedder import get_embeddings
 
-QDRANT_URL = "http://192.168.1.242:6333"
+QDRANT_URL = "http://127.0.0.1:6333"
 COLLECTION_NAME = "repo_chunks"
 
 # use Uvicorn / FastAPI logger

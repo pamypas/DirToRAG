@@ -1,5 +1,5 @@
-api_base: https://api.proxyapi.ru/openai
+api_base: http://192.168.1.242:1234
 api_key: key
 models:
-  - name: gpt-4.1-nano-2025-04-14
-  - name: text-embedding-3-small
+  - name: qwen2.5-coder-1.5b-instruct-mlx
+  - name: text-embedding-qwen3-embedding-0.6b

@@ -1,5 +1,5 @@
 import os
-from typing import List
+from typing import List, Set
 from pathlib import Path
 
 from qdrant_client import QdrantClient
@@ -7,7 +7,7 @@ from qdrant_client.http import models as qmodels
 
 from embedder import get_embeddings
 
-QDRANT_URL = "http://192.168.1.242:6333"
+QDRANT_URL = "http://127.0.0.1:6333"
 COLLECTION_NAME = "repo_chunks"
 
 # простое разбиение на chunk'и по символам
@@ -15,6 +15,12 @@ CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 200
 
 ALLOWED_EXT = {".pp", ".yaml", ".yml", ".erb", ".epp", ".md", ".txt"}
+
+# размер батча для запросов к сервису эмбеддингов
+EMBEDDING_BATCH_SIZE = 16
+
+# файл, в который пишем успешно проиндексированные файлы
+INDEXED_LOG_FILENAME = ".indexed_files.log"
 
 
 def iter_files(repo_path: Path) -> List[Path]:
@@ -45,6 +51,31 @@ def chunk_text(text: str):
     return chunks
 
 
+def load_indexed_files(log_path: Path) -> Set[str]:
+    """
+    Читает лог уже проиндексированных файлов.
+    Возвращает множество относительных путей (строки).
+    """
+    if not log_path.exists():
+        return set()
+    indexed: Set[str] = set()
+    with log_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            indexed.add(line)
+    return indexed
+
+
+def append_indexed_file(log_path: Path, rel_path: str) -> None:
+    """
+    Добавляет один относительный путь файла в лог.
+    """
+    with log_path.open("a", encoding="utf-8") as f:
+        f.write(rel_path + "\n")
+
+
 def main():
     import argparse
 
@@ -53,6 +84,10 @@ def main():
     args = parser.parse_args()
 
     repo_path = Path(args.repo_path).resolve()
+    log_path = repo_path / INDEXED_LOG_FILENAME
+
+    # загружаем список уже проиндексированных файлов
+    indexed_files_set = load_indexed_files(log_path)
 
     # Используем тот же режим, что и в rag_proxy.py: HTTP, без gRPC
     client = QdrantClient(
@@ -74,22 +109,58 @@ def main():
             ),
         )
 
+    # сначала посчитаем общее количество файлов для индексации
+    all_files = list(iter_files(repo_path))
+    total_files = len(all_files)
+    if total_files == 0:
+        print("Нет файлов для индексации")
+        return
+
     points = []
     point_id = 1
+    indexed_files = 0  # счётчик успешно проиндексированных файлов (в этом запуске)
+    last_progress = -1  # чтобы не спамить одинаковыми значениями
 
-    for fpath in iter_files(repo_path):
+    for fpath in all_files:
+        rel_path = str(fpath.relative_to(repo_path))
+
+        # пропускаем файлы, которые уже были успешно проиндексированы ранее
+        if rel_path in indexed_files_set:
+            continue
+
         try:
             text = fpath.read_text(encoding="utf-8", errors="ignore")
         except Exception:
-            continue
-        chunks = chunk_text(text)
-        if not chunks:
+            # не удалось прочитать файл — просто пропускаем
             continue
 
-        embs = get_embeddings(chunks)
-        for chunk, emb in zip(chunks, embs):
+        chunks = chunk_text(text)
+        if not chunks:
+            # нечего индексировать
+            append_indexed_file(log_path, rel_path)
+            indexed_files += 1
+            continue
+
+        # получаем эмбеддинги по батчам
+        all_embs = []
+        for i in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
+            batch_chunks = chunks[i : i + EMBEDDING_BATCH_SIZE]
+            batch_embs = get_embeddings(batch_chunks)
+            # на всякий случай обрежем до минимальной длины
+            min_len = min(len(batch_chunks), len(batch_embs))
+            all_embs.extend(batch_embs[:min_len])
+
+        # если по итогу эмбеддингов меньше, чем чанков, обрежем список чанков
+        if len(all_embs) < len(chunks):
+            chunks = chunks[: len(all_embs)]
+
+        # если вообще не получили эмбеддингов — считаем, что файл не проиндексирован
+        if not all_embs:
+            continue
+
+        for chunk, emb in zip(chunks, all_embs):
             meta = {
-                "path": str(fpath.relative_to(repo_path)),
+                "path": rel_path,
             }
             points.append(
                 qmodels.PointStruct(
@@ -99,6 +170,20 @@ def main():
                 )
             )
             point_id += 1
+
+        # файл успешно проиндексирован — записываем в лог
+        append_indexed_file(log_path, rel_path)
+        indexed_files_set.add(rel_path)
+        indexed_files += 1
+
+        # считаем прогресс в процентах и выводим только при изменении
+        progress = int(indexed_files * 100 / total_files)
+        if progress != last_progress:
+            print(
+                f"Прогресс индексации: {progress}% "
+                f"({indexed_files}/{total_files} файлов)"
+            )
+            last_progress = progress
 
         # по батчам, чтобы не жечь память
         if len(points) >= 500:
@@ -114,7 +199,10 @@ def main():
             points=points,
         )
 
-    print("Indexing finished")
+    print(
+        f"Indexing finished, всего проиндексировано файлов в этом запуске: "
+        f"{indexed_files} из {total_files}"
+    )
 
 
 if __name__ == "__main__":

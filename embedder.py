@@ -6,7 +6,7 @@ _cfg = load_models_config()
 _client = httpx.Client(
     base_url=_cfg["api_base"],
     headers={"Authorization": f"Bearer {_cfg['api_key']}"},
-    timeout=60.0,
+    timeout=300.0,  # 5 минут
     trust_env=False,   # <─ не читать HTTP(S)_PROXY, NO_PROXY и т.п.
 )
 
