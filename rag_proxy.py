@@ -31,16 +31,18 @@ for var in (
 ):
     os.environ.pop(var, None)
 
+# Загружаем раздельные конфиги для LLM и embedding
 cfg = load_models_config()
+llm_cfg = cfg["llm"]
 
 llm_client = httpx.AsyncClient(
-    base_url=cfg["api_base"],
-    headers={"Authorization": f"Bearer {cfg['api_key']}"},
+    base_url=llm_cfg["api_base"],
+    headers={"Authorization": f"Bearer {llm_cfg['api_key']}"} if llm_cfg["api_key"] else {},
     timeout=120.0,
     trust_env=False,
 )
 
-LLM_MODEL = cfg["llm_model"]
+LLM_MODEL = llm_cfg["model"]
 
 app = FastAPI()
 
@@ -64,16 +66,30 @@ SYSTEM_PROMPT = (
 )
 
 
-async def call_llm(messages):
-    resp = await llm_client.post(
-        "/v1/chat/completions",
-        json={
-            "model": LLM_MODEL,
-            "messages": messages,
-        },
-    )
-    resp.raise_for_status()
-    return resp.json()
+async def call_llm(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Вызов LLM. При ошибке подключения возвращаем контролируемый JSON,
+    чтобы FastAPI не падал 500 с трейсбеком.
+    """
+    try:
+        resp = await llm_client.post(
+            "/v1/chat/completions",
+            json={
+                "model": LLM_MODEL,
+                "messages": messages,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.HTTPError as e:
+        logger.exception("LLM request failed: %s", e)
+        # Возвращаем "ответ модели" в формате, который клиент сможет обработать.
+        return {
+            "error": {
+                "type": "llm_connection_error",
+                "message": f"Failed to connect to LLM backend: {e}",
+            }
+        }
 
 
 def collection_exists(client: QdrantClient, name: str) -> bool:
@@ -92,7 +108,7 @@ def qdrant_search_http(
     vector: List[float],
     limit: int = 8,
     with_payload: bool = True,
-) -> List[Dict,]:
+) -> List[Dict]:
     """
     Perform a search in Qdrant using the REST API directly.
     Returns a list of hit dicts (each has 'payload', 'score', etc.).

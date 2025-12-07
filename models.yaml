@@ -1,5 +1,9 @@
-api_base: http://192.168.1.242:1234
-api_key: key
-models:
-  - name: qwen2.5-coder-1.5b-instruct-mlx
-  - name: text-embedding-qwen3-embedding-0.6b
+llm:
+  api_base: http://127.0.0.1:1234/
+  api_key: key
+  model: deepseek-chat
+
+embedding:
+  api_base: http://192.168.1.242:1234
+  api_key: key
+  model: text-embedding-qwen3-embedding-0.6b

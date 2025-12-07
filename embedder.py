@@ -2,15 +2,17 @@ import httpx
 from models_loader import load_models_config
 
 _cfg = load_models_config()
+_emb_cfg = _cfg["embedding"]
 
 _client = httpx.Client(
-    base_url=_cfg["api_base"],
-    headers={"Authorization": f"Bearer {_cfg['api_key']}"},
+    base_url=_emb_cfg["api_base"],
+    headers={"Authorization": f"Bearer {_emb_cfg['api_key']}"} if _emb_cfg["api_key"] else {},
     timeout=300.0,  # 5 минут
     trust_env=False,   # <─ не читать HTTP(S)_PROXY, NO_PROXY и т.п.
 )
 
-EMBEDDING_MODEL = _cfg["embedding_model"]
+EMBEDDING_MODEL = _emb_cfg["model"]
+
 
 def get_embeddings(texts):
     """
