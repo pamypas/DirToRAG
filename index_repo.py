@@ -19,7 +19,13 @@ ALLOWED_EXT = {".pp", ".yaml", ".yml", ".erb", ".epp", ".md", ".txt"}
 
 def iter_files(repo_path: Path) -> List[Path]:
     for root, dirs, files in os.walk(repo_path):
+        # не заходить в директории, имя которых начинается с точкой
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+
         for fname in files:
+            # при этом сами файлы, начинающиеся с точки, мы тоже не индексируем
+            if fname.startswith("."):
+                continue
             p = Path(root) / fname
             if p.suffix.lower() in ALLOWED_EXT:
                 yield p
