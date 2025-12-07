@@ -1,0 +1,8 @@
+pysocks
+urllib3[socks]
+fastapi
+uvicorn[standard]
+qdrant-client
+httpx
+pyyaml
+tiktoken
