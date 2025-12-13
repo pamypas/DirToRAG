@@ -16,13 +16,13 @@ QDRANT_URL = _repo_agent_cfg.get("qdrant_url", "http://127.0.0.1:6333")
 COLLECTION_NAME = _repo_agent_cfg.get("collection_name", "repo_chunks")
 
 # простое разбиение на chunk'и по символам
-CHUNK_SIZE = 1500
+CHUNK_SIZE = 300
 CHUNK_OVERLAP = 200
 
 ALLOWED_EXT = {".pp", ".yaml", ".yml", ".erb", ".epp", ".md", ".txt"}
 
 # размер батча для запросов к сервису эмбеддингов
-EMBEDDING_BATCH_SIZE = 16
+EMBEDDING_BATCH_SIZE = 4
 
 # файл, в который пишем успешно проиндексированные файлы
 INDEXED_LOG_FILENAME = ".indexed_files.log"
@@ -86,9 +86,11 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("repo_path", help="Path to local git repo")
+    parser.add_argument("collection_name", help="Qdrant collection name to create or use")
     args = parser.parse_args()
 
     repo_path = Path(args.repo_path).resolve()
+    collection_name = args.collection_name or COLLECTION_NAME
     log_path = repo_path / INDEXED_LOG_FILENAME
 
     # загружаем список уже проиндексированных файлов
@@ -102,12 +104,12 @@ def main():
 
     # создаём коллекцию, если нет
     existing_collections = [c.name for c in client.get_collections().collections]
-    if COLLECTION_NAME not in existing_collections:
+    if collection_name not in existing_collections:
         # размер вектора возьмём после первого вызова get_embeddings
         # поэтому сначала получим фиктивный embedding
         dim = len(get_embeddings(["test"])[0])
         client.recreate_collection(
-            collection_name=COLLECTION_NAME,
+            collection_name=collection_name,
             vectors_config=qmodels.VectorParams(
                 size=dim,
                 distance=qmodels.Distance.COSINE,
@@ -193,14 +195,14 @@ def main():
         # по батчам, чтобы не жечь память
         if len(points) >= 500:
             client.upsert(
-                collection_name=COLLECTION_NAME,
+                collection_name=collection_name,
                 points=points,
             )
             points = []
 
     if points:
         client.upsert(
-            collection_name=COLLECTION_NAME,
+            collection_name=collection_name,
             points=points,
         )
 

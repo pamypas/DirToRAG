@@ -39,6 +39,7 @@ llm_client = httpx.AsyncClient(
 )
 
 LLM_MODEL = llm_cfg["model"]
+LLM_DEBUG_CONTEXT = bool(llm_cfg.get("log_context", False))
 
 app = FastAPI()
 
@@ -160,6 +161,16 @@ async def chat_completions(request: Request):
             logger.exception("Agent %s failed to build context: %s", agent.__class__.__name__, e)
 
     context_text = "\n\n".join(context_parts) if context_parts else ""
+
+    # --- отладочный вывод контекста, добавляемого к запросу в модель ---
+    if LLM_DEBUG_CONTEXT:
+        if context_text:
+            logger.info(
+                "LLM контекст, собранный server.py для запроса пользователя:\n%s",
+                context_text,
+            )
+        else:
+            logger.info("LLM контекст, собранный server.py: пустой (агенты не вернули данных)")
 
     new_messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
