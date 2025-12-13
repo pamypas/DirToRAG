@@ -29,19 +29,34 @@ class RepoSearchAgent:
     найденными по векторному поиску в Qdrant.
     """
 
-    def __init__(self, limit: int = 8):
+    def __init__(self, config: dict | None = None, limit: int | None = None):
+        """
+        config:
+          limit: int
+          qdrant_url: str
+          collection_name: str
+          timeout: float
+        """
+        config = config or {}
+
+        # приоритет: явный аргумент > конфиг > дефолт
+        self.limit = limit if limit is not None else config.get("limit", 8)
+
+        qdrant_url = config.get("qdrant_url", QDRANT_URL)
+        self.collection_name = config.get("collection_name", COLLECTION_NAME)
+        timeout = config.get("timeout", 30.0)
+
         # prefer_grpc=False — используем HTTP-клиент
         self.qdrant = QdrantClient(
-            url=QDRANT_URL,
+            url=qdrant_url,
             prefer_grpc=False,
         )
         # отдельный HTTP-клиент для REST API поиска
         self.http_client = httpx.Client(
-            base_url=QDRANT_URL,
-            timeout=30.0,
+            base_url=qdrant_url,
+            timeout=timeout,
             trust_env=False,
         )
-        self.limit = limit
 
     def _qdrant_search_http(
         self,
@@ -71,7 +86,7 @@ class RepoSearchAgent:
         Возвращает строку (может быть пустой, если контекст не найден).
         """
         # Если коллекции нет — не добавляем контекст
-        if not collection_exists(self.qdrant, COLLECTION_NAME):
+        if not collection_exists(self.qdrant, self.collection_name):
             return ""
 
         # 1. Получаем эмбеддинг запроса
@@ -84,7 +99,7 @@ class RepoSearchAgent:
         # 2. Ищем в Qdrant
         try:
             search_res = self._qdrant_search_http(
-                collection_name=COLLECTION_NAME,
+                collection_name=self.collection_name,
                 vector=emb,
                 limit=self.limit,
                 with_payload=True,

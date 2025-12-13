@@ -1,0 +1,25 @@
+llm:
+  api_base: http://localhost:1234/
+  api_key: key
+  model: deepseek-chat
+
+embedding:
+  api_base: http://192.168.1.242:1234
+  api_key: key
+  model: text-embedding-qwen3-embedding-0.6b
+
+agents:
+  - name: RepoSearchAgent
+    module: agents.agent1
+    enabled: true
+    config:
+      limit: 8
+      qdrant_url: http://127.0.0.1:6333
+      collection_name: repo_chunks
+      timeout: 30.0
+
+  - name: ExampleAgent
+    module: agents.agent2
+    enabled: true
+    config:
+      some_param: 123

@@ -1,12 +1,13 @@
 import os
 import logging
 from typing import List, Dict, Any
+from importlib import import_module
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from models_loader import load_models_config
+from models_loader import load_app_config
 from agents.agent1 import RepoSearchAgent
 from agents.agent2 import ExampleAgent
 
@@ -26,8 +27,8 @@ for var in (
 ):
     os.environ.pop(var, None)
 
-# Загружаем раздельные конфиги для LLM и embedding
-cfg = load_models_config()
+# Загружаем единый конфиг приложения (LLM, embedding, агенты)
+cfg = load_app_config()
 llm_cfg = cfg["llm"]
 
 llm_client = httpx.AsyncClient(
@@ -73,11 +74,64 @@ async def call_llm(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         }
 
 
+def init_agents(app_cfg: Dict[str, Any]) -> List[Any]:
+    """
+    Инициализирует агентов на основе секции `agents` в config.yaml.
+
+    Формат секции agents:
+      - name: RepoSearchAgent
+        module: agents.agent1
+        enabled: true
+        config: {...}
+    """
+    agents_cfg = app_cfg.get("agents", [])
+    result: List[Any] = []
+
+    for a in agents_cfg:
+        if not a.get("enabled", True):
+            continue
+
+        module_name = a.get("module")
+        class_name = a.get("name")
+        if not module_name or not class_name:
+            logger.error("Некорректная запись агента в конфиге: %s", a)
+            continue
+
+        agent_conf = a.get("config", {}) or {}
+
+        try:
+            module = import_module(module_name)
+            cls = getattr(module, class_name)
+        except Exception as e:
+            logger.exception(
+                "Не удалось импортировать агента %s из модуля %s: %s",
+                class_name,
+                module_name,
+                e,
+            )
+            continue
+
+        try:
+            # по соглашению — конструктор принимает config: dict
+            agent = cls(config=agent_conf)
+        except TypeError:
+            # на случай старых агентов без параметра config
+            logger.warning(
+                "Агент %s не принимает параметр config, инициализируем без него",
+                class_name,
+            )
+            agent = cls()
+        except Exception as e:
+            logger.exception("Не удалось инициализировать агента %s: %s", class_name, e)
+            continue
+
+        result.append(agent)
+
+    return result
+
+
 # Инициализируем агентов, которые будут наполнять контекст
-agents = [
-    RepoSearchAgent(),
-    ExampleAgent(),  # пример "пустого" агента
-]
+agents = init_agents(cfg)
 
 
 @app.post("/v1/chat/completions")

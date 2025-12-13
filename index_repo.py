@@ -6,9 +6,14 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 
 from embedder import get_embeddings
+from models_loader import load_app_config
 
-QDRANT_URL = "http://127.0.0.1:6333"
-COLLECTION_NAME = "repo_chunks"
+_cfg = load_app_config()
+_agents_cfg = {a["name"]: a for a in _cfg.get("agents", [])}
+_repo_agent_cfg = _agents_cfg.get("RepoSearchAgent", {}).get("config", {})
+
+QDRANT_URL = _repo_agent_cfg.get("qdrant_url", "http://127.0.0.1:6333")
+COLLECTION_NAME = _repo_agent_cfg.get("collection_name", "repo_chunks")
 
 # простое разбиение на chunk'и по символам
 CHUNK_SIZE = 1500

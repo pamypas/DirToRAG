@@ -1,7 +1,7 @@
 import httpx
-from models_loader import load_models_config
+from models_loader import load_app_config
 
-_cfg = load_models_config()
+_cfg = load_app_config()
 _emb_cfg = _cfg["embedding"]
 
 _client = httpx.Client(
