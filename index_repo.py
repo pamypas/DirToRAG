@@ -16,13 +16,13 @@ QDRANT_URL = _repo_agent_cfg.get("qdrant_url", "http://127.0.0.1:6333")
 COLLECTION_NAME = _repo_agent_cfg.get("collection_name", "repo_chunks")
 
 # простое разбиение на chunk'и по символам
-CHUNK_SIZE = 300
+CHUNK_SIZE = 250
 CHUNK_OVERLAP = 200
 
 ALLOWED_EXT = {".pp", ".yaml", ".yml", ".erb", ".epp", ".md", ".txt"}
 
 # размер батча для запросов к сервису эмбеддингов
-EMBEDDING_BATCH_SIZE = 4
+EMBEDDING_BATCH_SIZE = 16
 
 # файл, в который пишем успешно проиндексированные файлы
 INDEXED_LOG_FILENAME = ".indexed_files.log"
