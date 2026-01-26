@@ -1,24 +1,20 @@
 import os
 import time
-from typing import List, Set
+from typing import List, Set, Dict, Any
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-
-from qdrant_client import QdrantClient
-from qdrant_client.http import models as qmodels
+import httpx
 
 from embedder import get_embeddings
 from models_loader import load_app_config
 
-_cfg = load_app_config()
-_agents_cfg = {a["name"]: a for a in _cfg.get("agents", [])}
-_repo_agent_cfg = _agents_cfg.get("RepoSearchAgent", {}).get("config", {})
-
-QDRANT_URL = _repo_agent_cfg.get("qdrant_url", "http://127.0.0.1:6333")
-COLLECTION_NAME = _repo_agent_cfg.get("collection_name", "repo_chunks")
+# Supabase конфигурация
+SUPABASE_URL = "http://192.168.1.169:8000/rest/v1/"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzY4Njc1OTU5LCJleHAiOjE5MjYzNTU5NTl9.6SWlDUqRqlMYooSNeJG9fI_UuT8LyFPYqfxbr5tZahE"
+TABLE_NAME = "documents"
 
 # простое разбиение на chunk'и по символам
-CHUNK_SIZE = 250
+CHUNK_SIZE = 250  
 CHUNK_OVERLAP = 200
 
 ALLOWED_EXT = {".pp", ".yaml", ".yml", ".erb", ".epp", ".md", ".txt"}
@@ -86,42 +82,45 @@ def append_indexed_file(log_path: Path, rel_path: str) -> None:
         f.write(rel_path + "\n")
 
 
+def insert_to_supabase(data: List[Dict[str, Any]]) -> None:
+    """
+    Вставляет данные в Supabase через REST API.
+    """
+    client = httpx.Client()
+    try:
+        # Отправляем данные по одному, так как Supabase может не поддерживать batch insert
+        for record in data:
+            response = client.post(
+                f"{SUPABASE_URL}{TABLE_NAME}",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal"
+                },
+                json=record
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        print(f"Ошибка при вставке данных: {e}")
+        print(f"Ответ сервера: {e.response.text}")
+        raise
+    finally:
+        client.close()
+
+
 def main():
     import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("repo_path", help="Path to local git repo")
-    parser.add_argument("collection_name", help="Qdrant collection name to create or use")
     args = parser.parse_args()
 
     repo_path = Path(args.repo_path).resolve()
-    collection_name = args.collection_name or COLLECTION_NAME
     log_path = repo_path / INDEXED_LOG_FILENAME
 
     # загружаем список уже проиндексированных файлов
     indexed_files_set = load_indexed_files(log_path)
-
-    # Используем тот же режим, что и в rag_proxy.py: HTTP, без gRPC
-    # Увеличиваем таймаут до 60 секунд, чтобы избежать WriteTimeout при больших батчах
-    client = QdrantClient(
-        url=QDRANT_URL,
-        prefer_grpc=False,
-        timeout=60.0,
-    )
-
-    # создаём коллекцию, если нет
-    existing_collections = [c.name for c in client.get_collections().collections]
-    if collection_name not in existing_collections:
-        # размер вектора возьмём после первого вызова get_embeddings
-        # поэтому сначала получим фиктивный embedding
-        dim = len(get_embeddings(["test"])[0])
-        client.recreate_collection(
-            collection_name=collection_name,
-            vectors_config=qmodels.VectorParams(
-                size=dim,
-                distance=qmodels.Distance.COSINE,
-            ),
-        )
 
     # сначала посчитаем общее количество файлов для индексации
     all_files = list(iter_files(repo_path))
@@ -130,8 +129,6 @@ def main():
         print("Нет файлов для индексации")
         return
 
-    points = []
-    point_id = 1
     indexed_files = 0  # счётчик успешно проиндексированных файлов (в этом запуске)
     last_progress = -1  # чтобы не спамить одинаковыми значениями
 
@@ -148,7 +145,7 @@ def main():
         try:
             text = fpath.read_text(encoding="utf-8", errors="ignore")
         except Exception:
-            # не удалось прочитать файл — просто пропускаем
+            # не удалось прочитать файл - просто пропускаем
             continue
 
         chunks = chunk_text(text)
@@ -184,24 +181,34 @@ def main():
         if len(all_embs) < len(chunks):
             chunks = chunks[: len(all_embs)]
 
-        # если вообще не получили эмбеддингов — считаем, что файл не проиндексирован
+        # если вообще не получили эмбеддингов - считаем, что файл не проиндексирован
         if not all_embs:
             continue
 
+        # Подготавливаем данные для вставки в Supabase
+        records_to_insert = []
         for chunk, emb in zip(chunks, all_embs):
-            meta = {
-                "path": rel_path,
-            }
-            points.append(
-                qmodels.PointStruct(
-                    id=point_id,
-                    vector=emb,
-                    payload={"text": chunk, **meta},
-                )
-            )
-            point_id += 1
+            records_to_insert.append({
+                "content": chunk,
+                "embedding": emb,
+                "metadata": {"path": rel_path}
+            })
 
-        # файл успешно проиндексирован — записываем в лог
+        # Отправляем данные в Supabase с ретраями
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                insert_to_supabase(records_to_insert)
+                break
+            except Exception as e:
+                print(f"Ошибка при отправке данных в Supabase (попытка {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)  # пауза перед повторной попыткой
+                else:
+                    print("Не удалось отправить данные после нескольких попыток. Пропуск...")
+                    continue
+
+        # файл успешно проиндексирован - записываем в лог
         append_indexed_file(log_path, rel_path)
         indexed_files_set.add(rel_path)
         indexed_files += 1
@@ -215,43 +222,8 @@ def main():
             )
             last_progress = progress
 
-        # по батчам, чтобы не жечь память
-        if len(points) >= 500:
-            # Пробуем отправить батч с повторными попытками при ошибках сети
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    client.upsert(
-                        collection_name=collection_name,
-                        points=points,
-                    )
-                    points = []
-                    break
-                except Exception as e:
-                    print(f"Ошибка при отправке батча в Qdrant (попытка {attempt + 1}/{max_retries}): {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(2)  # пауза перед повторной попыткой
-                    else:
-                        print("Не удалось отправить батч после нескольких попыток. Пропуск...")
-                        points = []  # очищаем, чтобы не зациклиться, но теряем эти точки
-
     # Завершаем работу executor
     executor.shutdown(wait=True)
-
-    if points:
-        # Финальная отправка оставшихся точек с ретраями
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                client.upsert(
-                    collection_name=collection_name,
-                    points=points,
-                )
-                break
-            except Exception as e:
-                print(f"Ошибка при отправке финального батча (попытка {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2)
 
     print(
         f"Indexing finished, всего проиндексировано файлов в этом запуске: "
