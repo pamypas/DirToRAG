@@ -1,6 +1,8 @@
 import os
+import time
 from typing import List, Set
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
@@ -24,13 +26,16 @@ ALLOWED_EXT = {".pp", ".yaml", ".yml", ".erb", ".epp", ".md", ".txt"}
 # размер батча для запросов к сервису эмбеддингов
 EMBEDDING_BATCH_SIZE = 16
 
+# количество параллельных запросов к embedding API
+EMBEDDING_CONCURRENCY = 4
+
 # файл, в который пишем успешно проиндексированные файлы
 INDEXED_LOG_FILENAME = ".indexed_files.log"
 
 
 def iter_files(repo_path: Path) -> List[Path]:
     for root, dirs, files in os.walk(repo_path):
-        # не заходить в директории, имя которых начинается с точкой
+        # не заходить в директории, имя которых начинается с точку
         dirs[:] = [d for d in dirs if not d.startswith(".")]
 
         for fname in files:
@@ -97,9 +102,11 @@ def main():
     indexed_files_set = load_indexed_files(log_path)
 
     # Используем тот же режим, что и в rag_proxy.py: HTTP, без gRPC
+    # Увеличиваем таймаут до 60 секунд, чтобы избежать WriteTimeout при больших батчах
     client = QdrantClient(
         url=QDRANT_URL,
         prefer_grpc=False,
+        timeout=60.0,
     )
 
     # создаём коллекцию, если нет
@@ -128,6 +135,9 @@ def main():
     indexed_files = 0  # счётчик успешно проиндексированных файлов (в этом запуске)
     last_progress = -1  # чтобы не спамить одинаковыми значениями
 
+    # Инициализируем пул потоков для параллельных запросов
+    executor = ThreadPoolExecutor(max_workers=EMBEDDING_CONCURRENCY)
+
     for fpath in all_files:
         rel_path = str(fpath.relative_to(repo_path))
 
@@ -148,14 +158,27 @@ def main():
             indexed_files += 1
             continue
 
-        # получаем эмбеддинги по батчам
+        # разбиваем чанки на батчи для параллельной обработки
+        batches = [chunks[i : i + EMBEDDING_BATCH_SIZE] for i in range(0, len(chunks), EMBEDDING_BATCH_SIZE)]
+        
+        # отправляем запросы параллельно
+        futures = [executor.submit(get_embeddings, batch) for batch in batches]
+        
         all_embs = []
-        for i in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
-            batch_chunks = chunks[i : i + EMBEDDING_BATCH_SIZE]
-            batch_embs = get_embeddings(batch_chunks)
-            # на всякий случай обрежем до минимальной длины
-            min_len = min(len(batch_chunks), len(batch_embs))
-            all_embs.extend(batch_embs[:min_len])
+        file_failed = False
+        for future in futures:
+            try:
+                batch_embs = future.result()
+                all_embs.extend(batch_embs)
+            except Exception as e:
+                # Если один из батчей упал с ошибкой (например, таймаут),
+                # пропускаем весь файл, чтобы не записывать частичные данные.
+                print(f"Ошибка при обработке файла {rel_path}: {e}")
+                file_failed = True
+                break
+        
+        if file_failed:
+            continue
 
         # если по итогу эмбеддингов меньше, чем чанков, обрежем список чанков
         if len(all_embs) < len(chunks):
@@ -194,17 +217,41 @@ def main():
 
         # по батчам, чтобы не жечь память
         if len(points) >= 500:
-            client.upsert(
-                collection_name=collection_name,
-                points=points,
-            )
-            points = []
+            # Пробуем отправить батч с повторными попытками при ошибках сети
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    client.upsert(
+                        collection_name=collection_name,
+                        points=points,
+                    )
+                    points = []
+                    break
+                except Exception as e:
+                    print(f"Ошибка при отправке батча в Qdrant (попытка {attempt + 1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)  # пауза перед повторной попыткой
+                    else:
+                        print("Не удалось отправить батч после нескольких попыток. Пропуск...")
+                        points = []  # очищаем, чтобы не зациклиться, но теряем эти точки
+
+    # Завершаем работу executor
+    executor.shutdown(wait=True)
 
     if points:
-        client.upsert(
-            collection_name=collection_name,
-            points=points,
-        )
+        # Финальная отправка оставшихся точек с ретраями
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                client.upsert(
+                    collection_name=collection_name,
+                    points=points,
+                )
+                break
+            except Exception as e:
+                print(f"Ошибка при отправке финального батча (попытка {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2)
 
     print(
         f"Indexing finished, всего проиндексировано файлов в этом запуске: "

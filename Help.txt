@@ -1,0 +1,100 @@
+Отлично! У вас уже есть таблица `documents` с полями для полнотекстового поиска (`fts`) и векторных эмбеддингов (`embedding`), а также программа для создания эмбеддингов. Вот как направить данные в таблицу.
+
+### Основные способы загрузки данных
+
+#### 1. **Прямые SQL-запросы (через `psql` или любой клиент)**
+Это самый прямой метод. Подключитесь к вашей локальной Supabase БД и выполните `INSERT`.
+
+**Шаг 1: Подключение к БД**
+Supabase в Docker обычно открывает порт `5432` для Postgres. Используйте `psql` или любой GUI-клиент (DBeaver, pgAdmin).
+```bash
+psql -h localhost -p 5432 -U postgres -d postgres
+```
+Пароль по умолчанию: `postgres` (если вы не меняли его в `.env` файле Supabase).
+
+**Шаг 2: Вставка данных**
+Ваша программа должна генерировать для каждого документа:
+- `content` (исходный текст)
+- `embedding` (вектор размерности 512)
+
+Пример `INSERT`-запроса (в `psql` или через клиент):
+```sql
+INSERT INTO documents (content, embedding)
+VALUES 
+  ('Текст первого документа', '[0.1, 0.2, ..., 0.512]'::vector),
+  ('Текст второго документа', '[0.3, 0.4, ..., 0.512]'::vector);
+```
+**Важно:** 
+- Поле `fts` генерируется автоматически из `content` (благодаря `GENERATED ALWAYS`).
+- Вектор должен быть в формате PostgreSQL `vector` (массив чисел в квадратных скобках).
+- Если ваша программа выдает эмбеддинг в другом формате (например, список Python), преобразуйте его в строку вида `[v1, v2, ...]`.
+
+#### 2. **Через REST API Supabase (рекомендуется для скриптов)**
+Supabase автоматически генерирует REST API для ваших таблиц. Это удобно, если ваша программа на Python/Node.js.
+
+**Шаг 1: Получите `anon` ключ и URL**
+- Запустите Supabase: `docker-compose up`
+- Перейдите в Studio: `http://localhost:8000/project/default`
+- Настройки (шестеренка) → API → `anon` public ключ и URL (обычно `http://localhost:8000`).
+
+**Шаг 2: Пример на Python с библиотекой `supabase`**
+```python
+import supabase
+from your_embedding_program import generate_embedding
+
+# Инициализация клиента
+SUPABASE_URL = "http://localhost:8000"
+SUPABASE_KEY = "your-anon-key"  # Ключ из Studio
+client = supabase.create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Генерация данных
+documents = [
+    {"content": "Текст документа 1", "embedding": generate_embedding("Текст документа 1")},
+    {"content": "Текст документа 2", "embedding": generate_embedding("Текст документа 2")},
+]
+
+# Вставка
+for doc in documents:
+    # Преобразуем embedding в список (если это numpy array)
+    if hasattr(doc['embedding'], 'tolist'):
+        doc['embedding'] = doc['embedding'].tolist()
+    
+    response = client.table('documents').insert(doc).execute()
+    print(response.data)
+```
+
+#### 3. **Через SQL-файл (для массовой загрузки)**
+Если у вас много данных, подготовьте SQL-файл и загрузите его через `psql`.
+
+**Шаг 1: Создайте файл `insert_data.sql`**
+```sql
+INSERT INTO documents (content, embedding) VALUES
+('Текст 1', '[0.1, 0.2, ...]'),
+('Текст 2', '[0.3, 0.4, ...]'),
+...;
+```
+
+**Шаг 2: Выполните файл**
+```bash
+psql -h localhost -p 5432 -U postgres -d postgres -f insert_data.sql
+```
+
+### Ключевые моменты
+1. **Размерность вектора**: Убедитесь, что ваши эмбеддинги имеют размерность 512 (как в `vector(512)`).
+2. **Формат вектора**: В SQL-запросе используйте `'[v1, v2, ...]'::vector`. В REST API передавайте как массив чисел.
+3. **Индексы**: После загрузки данных индексы (`gin` для `fts` и `hnsw` для `embedding`) обновятся автоматически.
+4. **Производительность**: Для больших объемов данных (тысячи строк) используйте `COPY` вместо `INSERT` или вставляйте пачками (по 100-500 строк).
+
+### Если возникают проблемы
+- **Ошибка подключения**: Убедитесь, что контейнер Supabase запущен (`docker ps`).
+- **Ошибка формата вектора**: Проверьте, что числа разделены запятыми и нет лишних пробелов.
+- **Нехватка памяти**: Для больших наборов данных может потребоваться увеличить память Docker.
+
+После загрузки данных протестируйте функцию `hybrid_search`:
+```sql
+SELECT * FROM hybrid_search(
+  query_text => 'ваш запрос',
+  query_embedding => '[ваш_эмбеддинг_запроса]'::vector(512),
+  match_count => 10
+);
+```
