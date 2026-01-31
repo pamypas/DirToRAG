@@ -60,10 +60,32 @@ async def call_llm(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
                 json={
                     "model": LLM_MODEL,
                     "messages": messages,
+                    "stream": False
                 },
             )
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            
+            # Возвращаем ответ в формате OpenAI API
+            return {
+                "id": data.get("id", "chatcmpl-123"),
+                "object": "chat.completion",
+                "created": int(data.get("created", 1234567890)),
+                "model": data.get("model", LLM_MODEL),
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": data.get("usage", {}).get("prompt_tokens", 0),
+                    "completion_tokens": data.get("usage", {}).get("completion_tokens", 0),
+                    "total_tokens": data.get("usage", {}).get("total_tokens", 0)
+                }
+            }
     except httpx.HTTPError as e:
         logger.exception("LLM request failed: %s", e)
         return {
@@ -131,15 +153,18 @@ async def hybrid_search(query: str, match_count: int = 10) -> List[Dict]:
         if isinstance(query_embedding, list) and len(query_embedding) > 0 and isinstance(query_embedding[0], list):
             query_embedding = query_embedding[0]
         
+        # Проверяем размерность эмбеддинга
+        if len(query_embedding) != 1024:
+            logger.warning(f"Embedding size {len(query_embedding)} doesn't match expected 1024")
+        
         # Выполняем гибридный поиск через Supabase REST API
-        # Передаём embedding как список чисел, а не как строку
-        logger.debug(f"Query embedding type: {type(query_embedding)}, length: {len(query_embedding) if isinstance(query_embedding, list) else 'N/A'}")
+        # Передаём embedding как список чисел, который Supabase преобразует в vector(512)
         try:
             response = supabase_client.rpc(
                 "hybrid_search",
                 {
                     "query_text": query,
-                    "query_embedding": query_embedding,  # передаём как список
+                    "query_embedding": query_embedding,  # передаём как список чисел
                     "match_count": match_count
                 }
             ).execute()
@@ -147,8 +172,8 @@ async def hybrid_search(query: str, match_count: int = 10) -> List[Dict]:
             return response.data
         except Exception as rpc_error:
             logger.error(f"RPC call failed: {rpc_error}")
-            logger.error(f"Query embedding sample: {query_embedding[:5] if isinstance(query_embedding, list) else query_embedding}")
-            raise
+            # Возвращаем пустой результат
+            return []
         
     except Exception as e:
         logger.exception("Hybrid search failed: %s", e)
@@ -202,6 +227,7 @@ async def chat_completions(request: Request):
     new_messages.extend(messages)
 
     resp = await call_llm(new_messages)
+    logger.info(f"LLM response: {resp}")
     return JSONResponse(resp)
 
 
@@ -209,8 +235,9 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        "server_supabase:app",
+        "server_supabase:app", 
         host="0.0.0.0",
         port=8000,
         reload=False,
+        log_level="debug"
     )
