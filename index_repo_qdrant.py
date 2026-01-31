@@ -27,7 +27,7 @@ ALLOWED_EXT = {".pp", ".yaml", ".yml", ".erb", ".epp", ".md", ".txt"}
 EMBEDDING_BATCH_SIZE = 16
 
 # количество параллельных запросов к embedding API
-EMBEDDING_CONCURRENCY = 4
+EMBEDDING_CONCURRENCY = 12
 
 # файл, в который пишем успешно проиндексированные файлы
 INDEXED_LOG_FILENAME = ".indexed_files.log"
