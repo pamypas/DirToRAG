@@ -14,8 +14,8 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI
 TABLE_NAME = "documents"
 
 # простое разбиение на chunk'и по символам
-CHUNK_SIZE = 250  
-CHUNK_OVERLAP = 200
+CHUNK_SIZE = 1024
+CHUNK_OVERLAP = 256
 
 ALLOWED_EXT = {".pp", ".yaml", ".yml", ".erb", ".epp", ".md", ".txt"}
 

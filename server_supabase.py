@@ -8,7 +8,7 @@ from supabase import create_client, Client
 
 from models_loader import load_app_config
 
-# Use Uvicorn / FastAPI logger
+# Используем логгер uvicorn для гарантированного вывода в консоль
 logger = logging.getLogger("uvicorn.error")
 
 # Отключаем системные прокси
@@ -33,14 +33,27 @@ cfg = load_app_config()
 llm_cfg = cfg.get("llm", {})
 emb_cfg = cfg.get("embedding", {})
 
+# Логируем всю конфигурацию для отладки
+logger.info("Полная конфигурация приложения: %s", cfg)
+logger.info("Конфигурация LLM: %s", llm_cfg)
+
+# Преобразуем log_context в bool с учетом строковых значений
+log_context_val = llm_cfg.get("log_context", False)
+if isinstance(log_context_val, str):
+    LLM_DEBUG_CONTEXT = log_context_val.lower() in ["true", "1", "yes"]
+else:
+    LLM_DEBUG_CONTEXT = bool(log_context_val)
+
 LLM_API_BASE = llm_cfg.get("api_base", "http://192.168.1.169:11434/api")
 LLM_MODEL = llm_cfg.get("model", "mistral")
-LLM_DEBUG_CONTEXT = bool(llm_cfg.get("log_context", False))
 
 EMBEDDING_API_BASE = emb_cfg.get("api_base", LLM_API_BASE)
 EMBEDDING_MODEL = emb_cfg.get("model", LLM_MODEL)
 
 app = FastAPI()
+
+# Проверочное сообщение при старте с деталями
+logger.info("Приложение запущено. LLM_DEBUG_CONTEXT=%s (тип: %s)", LLM_DEBUG_CONTEXT, type(LLM_DEBUG_CONTEXT))
 
 SYSTEM_PROMPT = (
     "You are a code assistant. Use ONLY the repository context below to answer. "
@@ -132,6 +145,7 @@ async def hybrid_search(query: str, match_count: int = 10) -> List[Dict]:
             logger.error("No embedding data received")
             return []
             
+            
         # Извлекаем массив чисел из вложенной структуры ответа
         # Ожидаемый формат: [{"index": 0, "embedding": [[...]]}]
         if isinstance(embedding_data, list) and len(embedding_data) > 0 and "embedding" in embedding_data[0]:
@@ -197,19 +211,30 @@ async def chat_completions(request: Request):
 
     # Выполняем гибридный поиск
     search_results = await hybrid_search(user_msg)
-    
+
     # Форматируем результаты поиска в контекст для LLM
     context_text = format_search_results(search_results) if search_results else ""
 
-    # --- отладочный вывод контекста, добавляемого к запросу в модель ---
+    # --- отладочный вывод результатов поиска, которые пойдут в LLM ---
+    # Управляется опцией llm.log_context
     if LLM_DEBUG_CONTEXT:
-        if context_text:
-            logger.info(
-                "LLM контекст, собранный server.py для запроса пользователя:\n%s",
-                context_text,
-            )
+        logger.info("Результаты поиска:")
+        if not search_results:
+            logger.info("(пусто)")
         else:
-            logger.info("LLM контекст, собранный server.py: пустой (данных из Supabase нет)")
+            for result in search_results:
+                # Требуемый формат:
+                # {'id': <id>, 'content': "<контент как есть>", 'embedding': '[...]', 'metadata': <metadata>}
+                # Вектора не печатаем, вместо чисел — троеточие.
+                logger.info(
+                    "{'id': %r, 'content': %r, 'embedding': '[...]', 'metadata': %r}",
+                    result.get("id"),
+                    result.get("content"),
+                    result.get("metadata"),
+                )
+
+        if not context_text:
+            logger.warning("LLM контекст пустой - не найдено данных для запроса: '%s'", user_msg)
 
     # Формируем сообщение для LLM с контекстом
     new_messages: List[Dict[str, Any]] = [
@@ -227,7 +252,6 @@ async def chat_completions(request: Request):
     new_messages.extend(messages)
 
     resp = await call_llm(new_messages)
-    logger.info(f"LLM response: {resp}")
     return JSONResponse(resp)
 
 
@@ -235,9 +259,10 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        "server_supabase:app", 
+        "server_supabase:app",
         host="0.0.0.0",
         port=8000,
         reload=False,
-        log_level="debug"
+        log_level="debug",
+        log_config=None
     )

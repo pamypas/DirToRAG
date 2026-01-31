@@ -58,16 +58,30 @@ def load_app_config(path: str = "config.yaml") -> Dict[str, Any]:
             "В секции 'embedding' в config.yaml должны быть заданы 'api_base' и 'model'."
         )
 
-    data["llm"] = {
+    # Обновляем только указанные поля в секциях, сохраняя остальные параметры
+    if "llm" in data:
+        llm_section = data["llm"]
+    else:
+        llm_section = {}
+        data["llm"] = llm_section
+
+    llm_section.update({
         "api_base": llm_api_base,
         "api_key": llm_api_key,
         "model": llm_model,
-    }
-    data["embedding"] = {
+    })
+
+    if "embedding" in data:
+        emb_section = data["embedding"]
+    else:
+        emb_section = {}
+        data["embedding"] = emb_section
+
+    emb_section.update({
         "api_base": emb_api_base,
         "api_key": emb_api_key,
         "model": emb_model,
-    }
+    })
 
     return data
 

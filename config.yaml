@@ -1,0 +1,11 @@
+---
+llm:
+  api_base: http://192.168.1.169:1234
+  api_key: key
+  model: default
+  log_context: True
+
+embedding:
+  api_base: http://192.168.1.169:1235
+  api_key: key
+  model: default-embedding
