@@ -1,55 +1,48 @@
--- Удаляем существующие функции с таким же именем в разных схемах
-DROP FUNCTION IF EXISTS extensions.hybrid_search(text, extensions.vector, int, float, float, int);
-DROP FUNCTION IF EXISTS public.hybrid_search(text, extensions.vector, int, float, float, int);
-DROP FUNCTION IF EXISTS public.hybrid_search(text, vector, int, float, float, int);
-DROP FUNCTION IF EXISTS public.hybrid_search(text, vector(512), int, float, float, int);
-
--- Создаём функцию в схеме public с правильным типом и оператором
-CREATE OR REPLACE FUNCTION public.hybrid_search(
-  query_text TEXT,
-  query_embedding EXTENSIONS.VECTOR(1024),
-  match_count INT,
-  full_text_weight FLOAT DEFAULT 1,
-  semantic_weight FLOAT DEFAULT 1,
-  rrf_k INT DEFAULT 50
+create or replace function hybrid_search(
+  query_text text,
+  query_embedding extensions.vector(1024),
+  match_count int,
+  full_text_weight float = 1,
+  semantic_weight float = 1,
+  rrf_k int = 50
 )
-RETURNS SETOF documents
-LANGUAGE SQL
-AS $$
-WITH full_text AS (
-  SELECT
+returns setof documents
+language sql
+as $$
+with full_text as (
+  select
     id,
     -- Note: ts_rank_cd is not indexable but will only rank matches of the where clause
     -- which shouldn't be too big
-    ROW_NUMBER() OVER(ORDER BY ts_rank_cd(fts, websearch_to_tsquery(query_text)) DESC) AS rank_ix
-  FROM
+    row_number() over(order by ts_rank_cd(fts, websearch_to_tsquery(query_text)) desc) as rank_ix
+  from
     documents
-  WHERE
+  where
     fts @@ websearch_to_tsquery(query_text)
-  ORDER BY rank_ix
-  LIMIT LEAST(match_count, 30) * 2
+  order by rank_ix
+  limit least(match_count, 30) * 2
 ),
-semantic AS (
-  SELECT
+semantic as (
+  select
     id,
-    ROW_NUMBER() OVER (ORDER BY embedding <=> query_embedding) AS rank_ix
-  FROM
+    row_number() over (order by embedding <#> query_embedding) as rank_ix
+  from
     documents
-  ORDER BY rank_ix
-  LIMIT LEAST(match_count, 30) * 2
+  order by rank_ix
+  limit least(match_count, 30) * 2
 )
-SELECT
+select
   documents.*
-FROM
+from
   full_text
-  FULL OUTER JOIN semantic
-    ON full_text.id = semantic.id
-  JOIN documents
-    ON COALESCE(full_text.id, semantic.id) = documents.id
-ORDER BY
-  COALESCE(1.0 / (rrf_k + full_text.rank_ix), 0.0) * full_text_weight +
-  COALESCE(1.0 / (rrf_k + semantic.rank_ix), 0.0) * semantic_weight
-  DESC
-LIMIT
-  LEAST(match_count, 30)
+  full outer join semantic
+    on full_text.id = semantic.id
+  join documents
+    on coalesce(full_text.id, semantic.id) = documents.id
+order by
+  coalesce(1.0 / (rrf_k + full_text.rank_ix), 0.0) * full_text_weight +
+  coalesce(1.0 / (rrf_k + semantic.rank_ix), 0.0) * semantic_weight
+  desc
+limit
+  least(match_count, 30)
 $$;
