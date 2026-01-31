@@ -90,6 +90,12 @@ def insert_to_supabase(data: List[Dict[str, Any]]) -> None:
     try:
         # Отправляем данные по одному, так как Supabase может не поддерживать batch insert
         for record in data:
+            # Преобразуем эмбеддинг в формат, который ожидает Supabase для типа vector(1024)
+            if "embedding" in record and isinstance(record["embedding"], list):
+                # Преобразуем список чисел в строку вида "[1.2, 3.4, 5.6]"
+                embedding_str = "[" + ",".join(str(x) for x in record["embedding"]) + "]"
+                record["embedding"] = embedding_str
+                
             response = client.post(
                 f"{SUPABASE_URL}{TABLE_NAME}",
                 headers={

@@ -1,3 +1,17 @@
+CREATE TABLE public.documents (
+  id bigint primary key generated always as identity,
+  content text,
+  fts tsvector generated always as (to_tsvector('english', content)) stored,
+  embedding extensions.vector(1024),
+  metadata jsonb
+);
+
+-- Create an index for the full-text search
+create index on documents using gin(fts);
+-- Create an index for the semantic vector search
+create index on documents using hnsw (embedding vector_ip_ops);
+
+CREATE EXTENSION IF NOT EXISTS vector schema extensions;
 create or replace function hybrid_search(
   query_text text,
   query_embedding extensions.vector(1024),
@@ -8,6 +22,7 @@ create or replace function hybrid_search(
 )
 returns setof documents
 language sql
+SET search_path = public, extensions
 as $$
 with full_text as (
   select
