@@ -1,11 +1,18 @@
 ---
 llm:
   api_base: http://192.168.1.169:1234
+#  api_base: https://api.copilot.vk.team/v1
+#  api_base: http://127.0.0.1:1234
   api_key: key
   model: default
   log_context: True
 
 embedding:
   api_base: http://192.168.1.169:1235
+#  api_base: http://127.0.0.1:1234
   api_key: key
   model: default-embedding
+
+chunker:
+  max_chunk_size: 1024
+  overlap: 256

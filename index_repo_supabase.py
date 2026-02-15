@@ -1,5 +1,6 @@
 import os
 import time
+import json
 from typing import List, Set, Dict, Any
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -7,23 +8,20 @@ import httpx
 
 from embedder import get_embeddings
 from models_loader import load_app_config
+from chunker import chunk_text
 
 # Supabase конфигурация
 SUPABASE_URL = "http://192.168.1.169:8000/rest/v1/"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzY4Njc1OTU5LCJleHAiOjE5MjYzNTU5NTl9.6SWlDUqRqlMYooSNeJG9fI_UuT8LyFPYqfxbr5tZahE"
 TABLE_NAME = "documents"
 
-# простое разбиение на chunk'и по символам
-CHUNK_SIZE = 1024
-CHUNK_OVERLAP = 256
-
 ALLOWED_EXT = {".pp", ".yaml", ".yml", ".erb", ".epp", ".md", ".txt"}
 
 # размер батча для запросов к сервису эмбеддингов
-EMBEDDING_BATCH_SIZE = 16
+EMBEDDING_BATCH_SIZE = 10
 
 # количество параллельных запросов к embedding API
-EMBEDDING_CONCURRENCY = 4
+EMBEDDING_CONCURRENCY = 48
 
 # файл, в который пишем успешно проиндексированные файлы
 INDEXED_LOG_FILENAME = ".indexed_files.log"
@@ -41,20 +39,6 @@ def iter_files(repo_path: Path) -> List[Path]:
             p = Path(root) / fname
             if p.suffix.lower() in ALLOWED_EXT:
                 yield p
-
-
-def chunk_text(text: str):
-    chunks = []
-    start = 0
-    n = len(text)
-    while start < n:
-        end = min(start + CHUNK_SIZE, n)
-        chunk = text[start:end]
-        chunks.append(chunk)
-        if end == n:
-            break
-        start = end - CHUNK_OVERLAP
-    return chunks
 
 
 def load_indexed_files(log_path: Path) -> Set[str]:
@@ -120,10 +104,12 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("repo_path", help="Path to local git repo")
+    parser.add_argument("--dry-run", action="store_true", help="Выводить чанки и эмбеддинги в консоль без загрузки в БД")
     args = parser.parse_args()
 
     repo_path = Path(args.repo_path).resolve()
     log_path = repo_path / INDEXED_LOG_FILENAME
+    dry_run = args.dry_run
 
     # загружаем список уже проиндексированных файлов
     indexed_files_set = load_indexed_files(log_path)
@@ -145,7 +131,8 @@ def main():
         rel_path = str(fpath.relative_to(repo_path))
 
         # пропускаем файлы, которые уже были успешно проиндексированы ранее
-        if rel_path in indexed_files_set:
+        # В режиме dry-run мы можем игнорировать этот лог, чтобы видеть вывод для всех файлов
+        if not dry_run and rel_path in indexed_files_set:
             continue
 
         try:
@@ -154,11 +141,14 @@ def main():
             # не удалось прочитать файл - просто пропускаем
             continue
 
+        # Используем импортированную функцию chunk_text из chunker.py
         chunks = chunk_text(text)
+        
         if not chunks:
             # нечего индексировать
-            append_indexed_file(log_path, rel_path)
-            indexed_files += 1
+            if not dry_run:
+                append_indexed_file(log_path, rel_path)
+                indexed_files += 1
             continue
 
         # разбиваем чанки на батчи для параллельной обработки
@@ -189,6 +179,18 @@ def main():
 
         # если вообще не получили эмбеддингов - считаем, что файл не проиндексирован
         if not all_embs:
+            continue
+
+        # Режим dry-run: вывод в консоль
+        if dry_run:
+            print(f"\n{'='*20} FILE: {rel_path} {'='*20}")
+            for i, (chunk, emb) in enumerate(zip(chunks, all_embs)):
+                print(f"\n--- Chunk {i+1} ---")
+                print("Content:")
+                print(chunk)
+                print("\nEmbedding (first 10 values):")
+                print(json.dumps(emb[:10]))
+                print(f"Vector size: {len(emb)}")
             continue
 
         # Подготавливаем данные для вставки в Supabase

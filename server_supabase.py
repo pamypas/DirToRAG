@@ -124,7 +124,7 @@ def format_search_results(results: List[Dict]) -> str:
     return "\n".join(context_parts)
 
 
-async def hybrid_search(query: str, match_count: int = 10) -> List[Dict]:
+async def hybrid_search(query: str, match_count: int = 50) -> List[Dict]:
     """
     Выполняет гибридный поиск в Supabase с использованием FTS и векторного поиска
     """
