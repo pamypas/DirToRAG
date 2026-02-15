@@ -1,16 +1,18 @@
 ---
 llm:
-  api_base: http://192.168.1.169:8080
-#  api_base: https://api.copilot.vk.team
+#  api_base: http://192.168.1.169:8080
+  api_base: https://api.copilot.vk.team
 #  api_base: http://127.0.0.1:1234
   api_key: key
-  model: Qwen3-Coder-30B-A3B
+#  model: Qwen3-Coder-30B-A3B
+  model: default
   log_context: True
   search_limit: 70
 
 embedding:
-  api_base: http://192.168.1.169:8080
+#  api_base: http://192.168.1.169:8080
 #  api_base: http://127.0.0.1:1234
+  api_base: http://127.0.0.1:11434
   api_key: key
   model: bge-m3
   batch_size: 10        # chunks per request
