@@ -1,10 +1,11 @@
+import json
 import os
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, AsyncGenerator
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from models_loader import load_app_config
 from agents.pg_agent import PostgresSearchAgent, set_search_table as _set_table
@@ -54,7 +55,7 @@ app = FastAPI()
 search_agent = PostgresSearchAgent(config={"limit": SEARCH_LIMIT})
 
 
-async def call_llm(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+async def call_llm(messages: List[Dict[str, Any]], stream: bool = False) -> Dict[str, Any]:
     """Call LLM API."""
     try:
         resp = await llm_client.post(
@@ -62,6 +63,7 @@ async def call_llm(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
             json={
                 "model": LLM_MODEL,
                 "messages": messages,
+                "stream": stream,
             },
         )
         resp.raise_for_status()
@@ -76,10 +78,31 @@ async def call_llm(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         }
 
 
+async def stream_llm(messages: List[Dict[str, Any]]) -> AsyncGenerator[str, None]:
+    """Stream LLM API response."""
+    async with llm_client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": LLM_MODEL,
+            "messages": messages,
+            "stream": True,
+        },
+    ) as response:
+        async for line in response.aiter_lines():
+            if line.startswith("data: "):
+                data = line[6:]
+                if data == "[DONE]":
+                    yield "data: [DONE]\n\n"
+                    break
+                yield f"data: {data}\n\n"
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     body = await request.json()
     messages = body.get("messages", [])
+    stream = body.get("stream", False)
 
     # Extract system prompt from request (first message with role="system")
     system_prompt = "You are a code assistant."
@@ -96,6 +119,11 @@ async def chat_completions(request: Request):
 
     # If no user message - proxy to LLM directly
     if not user_msg:
+        if stream:
+            return StreamingResponse(
+                stream_llm(messages),
+                media_type="text/event-stream",
+            )
         resp = await call_llm(messages)
         return JSONResponse(resp)
 
@@ -121,6 +149,12 @@ async def chat_completions(request: Request):
 
     # Add non-system messages from original request
     new_messages.extend([m for m in messages if m.get("role") != "system"])
+
+    if stream:
+        return StreamingResponse(
+            stream_llm(new_messages),
+            media_type="text/event-stream",
+        )
 
     resp = await call_llm(new_messages)
     return JSONResponse(resp)
