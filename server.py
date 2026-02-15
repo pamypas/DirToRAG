@@ -1,20 +1,18 @@
 import os
 import logging
 from typing import List, Dict, Any
-from importlib import import_module
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from models_loader import load_app_config
-from agents.agent1 import RepoSearchAgent
-from agents.agent2 import ExampleAgent
+from agents.pg_agent import PostgresSearchAgent, set_search_table as _set_table
 
 # use Uvicorn / FastAPI logger
 logger = logging.getLogger("uvicorn.error")
 
-# отключаем системные прокси (как в rag_proxy.py)
+# disable system proxies
 for var in (
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -33,13 +31,9 @@ def set_search_table(table_name: str) -> None:
     Set the search table name for PostgresSearchAgent.
     This is called by CLI before starting the server.
     """
-    try:
-        from agents.pg_agent import set_search_table as _set_table
-        _set_table(table_name)
-    except ImportError:
-        logger.warning("pg_agent not available, cannot set search table")
+    _set_table(table_name)
 
-# Загружаем единый конфиг приложения (LLM, embedding, агенты)
+# Load config
 cfg = load_app_config()
 llm_cfg = cfg["llm"]
 
@@ -52,8 +46,12 @@ llm_client = httpx.AsyncClient(
 
 LLM_MODEL = llm_cfg["model"]
 LLM_DEBUG_CONTEXT = bool(llm_cfg.get("log_context", False))
+SEARCH_LIMIT = int(llm_cfg.get("search_limit", 10))
 
 app = FastAPI()
+
+# Initialize search agent
+search_agent = PostgresSearchAgent(config={"limit": SEARCH_LIMIT})
 
 SYSTEM_PROMPT = (
     "You are a code assistant. Use ONLY the repository context below to answer. "
@@ -63,10 +61,7 @@ SYSTEM_PROMPT = (
 
 
 async def call_llm(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Вызов LLM. При ошибке подключения возвращаем контролируемый JSON,
-    чтобы FastAPI не падал 500 с трейсбеком.
-    """
+    """Call LLM API."""
     try:
         resp = await llm_client.post(
             "/v1/chat/completions",
@@ -87,66 +82,6 @@ async def call_llm(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         }
 
 
-def init_agents(app_cfg: Dict[str, Any]) -> List[Any]:
-    """
-    Инициализирует агентов на основе секции `agents` в config.yaml.
-
-    Формат секции agents:
-      - name: RepoSearchAgent
-        module: agents.agent1
-        enabled: true
-        config: {...}
-    """
-    agents_cfg = app_cfg.get("agents", [])
-    result: List[Any] = []
-
-    for a in agents_cfg:
-        if not a.get("enabled", True):
-            continue
-
-        module_name = a.get("module")
-        class_name = a.get("name")
-        if not module_name or not class_name:
-            logger.error("Некорректная запись агента в конфиге: %s", a)
-            continue
-
-        agent_conf = a.get("config", {}) or {}
-
-        try:
-            module = import_module(module_name)
-            cls = getattr(module, class_name)
-        except Exception as e:
-            logger.exception(
-                "Не удалось импортировать агента %s из модуля %s: %s",
-                class_name,
-                module_name,
-                e,
-            )
-            continue
-
-        try:
-            # по соглашению — конструктор принимает config: dict
-            agent = cls(config=agent_conf)
-        except TypeError:
-            # на случай старых агентов без параметра config
-            logger.warning(
-                "Агент %s не принимает параметр config, инициализируем без него",
-                class_name,
-            )
-            agent = cls()
-        except Exception as e:
-            logger.exception("Не удалось инициализировать агента %s: %s", class_name, e)
-            continue
-
-        result.append(agent)
-
-    return result
-
-
-# Инициализируем агентов, которые будут наполнять контекст
-agents = init_agents(cfg)
-
-
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     body = await request.json()
@@ -157,44 +92,30 @@ async def chat_completions(request: Request):
             user_msg = m.get("content", "")
             break
 
-    # Если нет пользовательского сообщения — просто проксируем в LLM
+    # If no user message - proxy to LLM directly
     if not user_msg:
         resp = await call_llm(messages)
         return JSONResponse(resp)
 
-    # Собираем контекст от всех агентов
-    context_parts: List[str] = []
-    for agent in agents:
-        try:
-            ctx = agent.build_context(user_msg)
-            if ctx:
-                context_parts.append(ctx)
-        except Exception as e:
-            logger.exception("Agent %s failed to build context: %s", agent.__class__.__name__, e)
+    # Build context via search agent
+    context_text = search_agent.build_context(user_msg)
 
-    context_text = "\n\n".join(context_parts) if context_parts else ""
-
-    # --- отладочный вывод контекста, добавляемого к запросу в модель ---
+    # Debug output
     if LLM_DEBUG_CONTEXT:
         if context_text:
-            logger.info(
-                "LLM контекст, собранный server.py для запроса пользователя:\n%s",
-                context_text,
-            )
+            logger.info("LLM context for user query:\n%s", context_text)
         else:
-            logger.info("LLM контекст, собранный server.py: пустой (агенты не вернули данных)")
+            logger.info("LLM context is empty (no data found)")
 
     new_messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
     ]
 
     if context_text:
-        new_messages.append(
-            {
-                "role": "system",
-                "content": "Repository context:\n" + context_text,
-            }
-        )
+        new_messages.append({
+            "role": "system",
+            "content": "Repository context:\n" + context_text,
+        })
 
     new_messages.extend(messages)
 
@@ -205,9 +126,13 @@ async def chat_completions(request: Request):
 if __name__ == "__main__":
     import uvicorn
 
+    server_cfg = cfg.get("server", {})
+    host = server_cfg.get("host", "0.0.0.0")
+    port = server_cfg.get("port", 8000)
+
     uvicorn.run(
         "server:app",
-        host="0.0.0.0",
-        port=8000,
+        host=host,
+        port=port,
         reload=False,
     )

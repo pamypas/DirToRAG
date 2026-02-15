@@ -1,262 +1,146 @@
-# Local RAG Chat API
+# DirToRAG
 
-Этот проект поднимает локальный OpenAI‑совместимый эндпоинт `/v1/chat/completions`,
-который отвечает на вопросы о содержимом локального каталога с текстовыми файлами,
-используя Retrieval‑Augmented Generation (RAG) поверх Qdrant.
+Локальный RAG-сервис с OpenAI-совместимым API. Индексирует директории с кодом и отвечает на вопросы по содержимому.
 
-Текущая архитектура:
-
-- Индексация файлов в Qdrant: `index_repo.py`
-- Векторные эмбеддинги: `embedder.py`
-- Сервер с системой агентов: `server.py`
-  - `RepoSearchAgent` (`agents/agent1.py`) — ищет релевантные фрагменты в Qdrant
-  - `ExampleAgent` (`agents/agent2.py`) — пример «пустого» агента, пока ничего не делает
+Использует PostgreSQL с расширением pgvector для гибридного поиска (full-text + semantic).
 
 ---
 
-## Требования
+## Что внутри
 
-- Python 3.10+ (рекомендуется)
-- Запущенный экземпляр **Qdrant** (по умолчанию в коде: `http://127.0.0.1:6333`)
-- Доступ к **OpenAI‑совместимому API**
-- Ваш API‑ключ для этого провайдера
-
----
-
-## Установка
-
-1. Клонируйте репозиторий и перейдите в него:
-
-   ```bash
-   git clone <your-repo-url> rag
-   cd rag
-   ```
-
-2. Создайте и активируйте виртуальное окружение:
-
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # Linux / macOS
-   # venv\Scripts\activate   # Windows PowerShell
-   ```
-
-3. Установите зависимости:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. Сконфигурируйте модели и API в `models.yaml` (можно взять за основу `models.yaml.example`):
-
-   ```yaml
-   llm:
-     api_base: http://localhost:1234/
-     api_key: YOUR_LLM_API_KEY
-     model: deepseek-chat
-
-   embedding:
-     api_base: http://192.168.1.242:1234
-     api_key: YOUR_EMBEDDING_API_KEY
-     model: text-embedding-qwen3-embedding-0.6b
-   ```
-
-   - `llm` — конфиг для чат‑модели (используется сервером `server.py`).
-   - `embedding` — конфиг для модели эмбеддингов (используется `embedder.py` и `index_repo.py`).
-   - `api_base` — базовый URL OpenAI‑совместимого API (без `/v1`).
-   - `api_key` — ваш секретный ключ (держите локально, не коммитьте).
-   - `model` — имя модели у вашего провайдера.
+- **cli.py** — единая точка входа для всех операций
+- **server.py** — FastAPI сервер с эндпоинтом `/v1/chat/completions`
+- **embedder.py** — получение эмбеддингов через OpenAI-совместимый API
+- **chunker.py** — разбиение текста на чанки с сохранением логических блоков
+- **agents/pg_agent.py** — агент для гибридного поиска в PostgreSQL
 
 ---
 
-## Индексация директории в Qdrant
+## Быстрый старт
 
-1. Убедитесь, что Qdrant запущен и доступен по URL, указанному в:
-
-   - `index_repo.py` → `QDRANT_URL`
-   - `agents/agent1.py` → `QDRANT_URL`
-
-   По умолчанию в коде:
-
-   ```python
-   QDRANT_URL = "http://127.0.0.1:6333"
-   COLLECTION_NAME = "repo_chunks"
-   ```
-
-   При необходимости вы можете изменить `COLLECTION_NAME`, если хотите использовать другое имя коллекции.
-
-2. Запустите индексатор, указав путь к директории с текстовыми файлами:
-
-   ```bash
-   python index_repo.py /path/to/your/text/directory
-   ```
-
-   Индексатор:
-
-   - Рекурсивно обходит директорию.
-   - Пропускает скрытые директории (начинающиеся с `.`) и скрытые файлы.
-   - Индексирует файлы с расширениями: `.pp`, `.yaml`, `.yml`, `.erb`, `.epp`, `.md`, `.txt`.
-   - Делит содержимое на пересекающиеся чанки по символам.
-   - Вызывает внешний сервис эмбеддингов через `embedder.py`.
-   - Записывает точки в Qdrant с payload:
-     - `text` – текст чанка,
-     - `path` – относительный путь к файлу.
-   - Ведёт лог уже проиндексированных файлов в `.indexed_files.log` в корне указанного репо
-     и при повторном запуске пропускает их.
-
-   После завершения в Qdrant будет коллекция с чанками репозитория.
-
----
-
-## Сервер с агентами (`server.py`)
-
-Сервер реализует OpenAI‑совместимый эндпоинт `/v1/chat/completions` и использует
-систему агентов для «умного» наполнения контекста перед вызовом LLM.
-
-### Агенты
-
-Список агентов инициализируется в `server.py`:
-
-```python
-from agents.agent1 import RepoSearchAgent
-from agents.agent2 import ExampleAgent
-
-agents = [
-    RepoSearchAgent(),
-    ExampleAgent(),  # пример "пустого" агента
-]
-```
-
-Каждый агент должен реализовывать метод:
-
-```python
-def build_context(self, user_message: str) -> str:
-    ...
-```
-
-Возвращаемая строка добавляется к системному контексту перед вызовом LLM.
-
-#### RepoSearchAgent (`agents/agent1.py`)
-
-- Проверяет наличие коллекции `repo_chunks` в Qdrant.
-- Строит эмбеддинг пользовательского запроса через `get_embeddings`.
-- Делает поиск по Qdrant (REST API) и возвращает текстовый контекст вида:
-
-  ```text
-  [DOC 1] file: path/to/file1
-  <chunk text>
-
-  [DOC 2] file: path/to/file2
-  <chunk text>
-  ```
-
-Если коллекции нет или поиск/эмбеддинги падают с ошибкой, агент возвращает пустую строку.
-
-#### ExampleAgent (`agents/agent2.py`)
-
-Простейший пример агента:
-
-```python
-class ExampleAgent:
-    def build_context(self, user_message: str) -> str:
-        return ""
-```
-
-Сейчас он ничего не добавляет в контекст и нужен как шаблон для будущих агентов.
-
----
-
-## Запуск сервера
-
-Из корня репозитория:
+### 1. Подготовка окружения
 
 ```bash
-python server.py
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-или эквивалентно через uvicorn:
+### 2. Запуск PostgreSQL
 
 ```bash
-uvicorn server:app --host 0.0.0.0 --port 8000
+docker-compose up -d
 ```
 
-Сервер:
+Поднимет PostgreSQL с pgvector на `localhost:5432`, без пароля.
 
-- Отключает системные HTTP(S)‑прокси для предсказуемого поведения.
-- Загружает конфиг LLM из `models.yaml`.
-- При каждом запросе:
-  1. Находит последнее сообщение пользователя.
-  2. Вызывает всех агентов (`RepoSearchAgent`, `ExampleAgent` и т.д.) и собирает их контекст.
-  3. Формирует сообщения для LLM:
-     - `system` с базовым `SYSTEM_PROMPT`,
-     - опционально `system` с «Repository context: ...», если агенты вернули контекст,
-     - далее оригинальные сообщения клиента.
-  4. Проксирует запрос к внешнему LLM (`/v1/chat/completions`) и возвращает ответ в формате OpenAI.
+### 3. Конфигурация
 
-Если пользовательского сообщения нет, запрос просто проксируется в LLM без добавления контекста.
+Всё в одном файле `config.yaml`:
+
+```yaml
+llm:
+  api_base: https://your-llm-api/v1
+  api_key: your-key
+  model: gpt-4
+  log_context: True  # печатать контекст в логи
+
+embedding:
+  api_base: http://localhost:1235
+  api_key: key
+  model: text-embedding-3-small
+  batch_size: 10     # чанков на запрос
+  concurrency: 48    # параллельных запросов
+
+database:
+  host: localhost
+  port: 5432
+  name: dirtoRAG
+  user: postgres
+  password: ""
+
+server:
+  host: 0.0.0.0
+  port: 8000
+```
 
 ---
 
-## Пример запроса к серверу
+## Использование
 
-После запуска `server.py`:
+Все операции через `cli.py`:
+
+```bash
+# Создать таблицу для проекта
+python cli.py init my_project
+
+# Проиндексировать директорию
+python cli.py index my_project /path/to/repo
+
+# Dry-run — посмотреть чанки без записи в БД
+python cli.py index my_project /path/to/repo --dry-run
+
+# Запустить сервер
+python cli.py serve my_project
+```
+
+Можно создавать сколько угодно таблиц под разные проекты:
+
+```bash
+python cli.py init project_a
+python cli.py index project_a ./project-a
+
+python cli.py init project_b
+python cli.py index project_b ./project-b
+
+# Сервер ищет в указанной таблице
+python cli.py serve project_a
+```
+
+---
+
+## Как работает поиск
+
+Гибридный поиск = full-text search + векторный поиск:
+
+1. **Full-text** — PostgreSQL `tsvector` сGIN-индексом, находит документы по ключевым словам
+2. **Semantic** — pgvector с HNSW-индексом, находит семантически похожие чанки
+3. **RRF** (Reciprocal Rank Fusion) — объединяет результаты с весами
+
+Функция `hybrid_search_<table>` создаётся автоматически при `init`.
+
+---
+
+## Запрос к серверу
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-chat",
+    "model": "gpt-4",
     "messages": [
-      {"role": "user", "content": "Что делает этот репозиторий?"}
+      {"role": "user", "content": "Как работает авторизация в этом проекте?"}
     ]
   }'
 ```
 
-Сервис:
-
-1. Возьмёт последнее `user`‑сообщение.
-2. `RepoSearchAgent` найдёт релевантные чанки в Qdrant и сформирует контекст.
-3. Сформирует системные сообщения с этим контекстом.
-4. Вызовет внешний LLM и вернёт его ответ.
+Сервер:
+1. Получает эмбеддинг запроса
+2. Ищет релевантные чанки в PostgreSQL
+3. Добавляет их в контекст
+4. Отправляет в LLM и возвращает ответ
 
 ---
 
-## Заметки и устранение неполадок
+## Поддерживаемые форматы файлов
 
-- Если Qdrant пуст или коллекция `repo_chunks` не существует:
-  - `RepoSearchAgent` вернёт пустой контекст,
-  - сервер всё равно ответит, но без RAG‑контекста.
-- Убедитесь, что `QDRANT_URL` в `index_repo.py` и `agents/agent1.py`
-  указывает на ваш запущенный Qdrant.
-- Если вы меняете модель эмбеддингов в `models.yaml`, рекомендуется:
-  - удалить/переименовать существующую коллекцию в Qdrant,
-  - заново запустить `index_repo.py`, чтобы коллекция была создана с правильным размером вектора.
-- Переменные окружения HTTP(S)_PROXY и NO_PROXY игнорируются в `embedder.py` и `server.py`
-  (используется `trust_env=False`), чтобы избежать неожиданных прокси‑настроек.
+По умолчанию: `.pp`, `.yaml`, `.yml`, `.erb`, `.epp`, `.md`, `.txt`
 
---- 
+---
 
-## Расширение системы агентов
+## Заметки
 
-Чтобы добавить нового агента:
-
-1. Создайте файл, например `agents/agentN.py`.
-2. Реализуйте класс с методом `build_context(self, user_message: str) -> str`.
-3. Подключите его в `server.py`:
-
-   ```python
-   from agents.agentN import MyNewAgent
-
-   agents = [
-       RepoSearchAgent(),
-       ExampleAgent(),
-       MyNewAgent(),
-   ]
-   ```
-
-Агент может:
-
-- читать файлы,
-- ходить во внешние сервисы,
-- использовать свои собственные кэши и т.п.
-
-Главное — возвращать строку, которая будет добавлена к общему контексту перед вызовом LLM.
+- Лог проиндексированных файлов — `.indexed_files.log` в корне директории
+- При повторной индексации уже обработанные файлы пропускаются
+- Прокси игнорируются (`trust_env=False`)
+- `log_context: True` в конфиге — видеть что летит в LLM

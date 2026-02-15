@@ -1,11 +1,12 @@
 ---
 llm:
 #  api_base: http://192.168.1.169:1234
-  api_base: https://api.copilot.vk.team/v1
+  api_base: https://api.copilot.vk.team
 #  api_base: http://127.0.0.1:1234
   api_key: key
   model: default
   log_context: True
+  search_limit: 70
 
 embedding:
   api_base: http://192.168.1.169:1235
@@ -28,4 +29,4 @@ database:
 
 server:
   host: 0.0.0.0
-  port: 8000
+  port: 8888

@@ -73,44 +73,74 @@ class PostgresSearchAgent:
         self.embedding_api_base = emb_cfg.get("api_base", "")
         self.embedding_model = emb_cfg.get("model", "")
 
+        # Sync HTTP client for embeddings
+        self.http_client = httpx.Client(
+            base_url=self.embedding_api_base,
+            timeout=120.0,
+            trust_env=False,
+        )
+
     def _get_table_name(self) -> str:
         """Get the table name to search."""
         return self.table_name if self.table_name else get_search_table()
 
-    async def _get_embedding(self, text: str) -> List[float]:
-        """Get embedding for text via API."""
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
-                f"{self.embedding_api_base}/embeddings",
-                json={"model": self.embedding_model, "input": [text]}
-            )
-            resp.raise_for_status()
-            data = resp.json()
+    def _get_embedding(self, text: str) -> List[float]:
+        """Get embedding for text via API (sync)."""
+        resp = self.http_client.post(
+            "/v1/embeddings",
+            json={"model": self.embedding_model, "input": [text]}
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         # Extract embedding from response
+        if "data" in data and len(data["data"]) > 0:
+            emb = data["data"][0].get("embedding", [])
+            if isinstance(emb, list) and len(emb) > 0:
+                if isinstance(emb[0], list):
+                    return emb[0]
+                return emb
+
+        # Fallback for other response formats
         if isinstance(data, list) and len(data) > 0 and "embedding" in data[0]:
             nested = data[0]["embedding"]
             if isinstance(nested, list) and len(nested) > 0:
                 if isinstance(nested[0], list):
                     return nested[0]
                 return nested
-        return data[0]
+
+        return data[0] if isinstance(data, list) else []
 
     def build_context(self, user_message: str) -> str:
         """
         Build context for LLM based on hybrid search.
         Returns string (may be empty if no results).
         """
-        import asyncio
-
         try:
-            # Run async search in sync context
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                results = loop.run_until_complete(self._hybrid_search(user_message))
-            finally:
-                loop.close()
+            # Get embedding
+            query_embedding = self._get_embedding(user_message)
+
+            if not query_embedding:
+                logger.warning("Empty embedding received")
+                return ""
+
+            if len(query_embedding) != 1024:
+                logger.warning(f"Embedding size {len(query_embedding)} != 1024")
+
+            # Execute hybrid search
+            table_name = self._get_table_name()
+            func_name = f"hybrid_search_{table_name}"
+            conn_str = get_db_connection_string()
+            embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+
+            with psycopg.connect(conn_str, row_factory=dict_row) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT * FROM {func_name}(%s, %s::extensions.vector, %s, %s, %s)",
+                        (user_message, embedding_str, self.limit,
+                         self.full_text_weight, self.semantic_weight)
+                    )
+                    results = cur.fetchall()
 
             if not results:
                 return ""
@@ -128,32 +158,3 @@ class PostgresSearchAgent:
         except Exception as e:
             logger.exception("PostgresSearchAgent failed: %s", e)
             return ""
-
-    async def _hybrid_search(self, query: str) -> List[Dict[str, Any]]:
-        """Execute hybrid search in PostgreSQL."""
-        try:
-            # Get embedding
-            query_embedding = await self._get_embedding(query)
-
-            if len(query_embedding) != 1024:
-                logger.warning(f"Embedding size {len(query_embedding)} != 1024")
-
-            table_name = self._get_table_name()
-            func_name = f"hybrid_search_{table_name}"
-            conn_str = get_db_connection_string()
-            embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
-
-            with psycopg.connect(conn_str, row_factory=dict_row) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"SELECT * FROM {func_name}(%s, %s::extensions.vector, %s, %s, %s)",
-                        (query, embedding_str, self.limit,
-                         self.full_text_weight, self.semantic_weight)
-                    )
-                    results = cur.fetchall()
-
-            return results
-
-        except Exception as e:
-            logger.exception("Hybrid search failed: %s", e)
-            return []
