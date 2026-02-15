@@ -27,6 +27,18 @@ for var in (
 ):
     os.environ.pop(var, None)
 
+
+def set_search_table(table_name: str) -> None:
+    """
+    Set the search table name for PostgresSearchAgent.
+    This is called by CLI before starting the server.
+    """
+    try:
+        from agents.pg_agent import set_search_table as _set_table
+        _set_table(table_name)
+    except ImportError:
+        logger.warning("pg_agent not available, cannot set search table")
+
 # Загружаем единый конфиг приложения (LLM, embedding, агенты)
 cfg = load_app_config()
 llm_cfg = cfg["llm"]

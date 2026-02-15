@@ -6,3 +6,4 @@ qdrant-client
 httpx
 pyyaml
 tiktoken
+psycopg[binary]
