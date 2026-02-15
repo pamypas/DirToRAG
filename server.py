@@ -53,12 +53,6 @@ app = FastAPI()
 # Initialize search agent
 search_agent = PostgresSearchAgent(config={"limit": SEARCH_LIMIT})
 
-SYSTEM_PROMPT = (
-    "You are a code assistant. Use ONLY the repository context below to answer. "
-    "If the context clearly contains relevant information, DO NOT say that you have no information. "
-    "If there is truly nothing relevant in the context, then say that."
-)
-
 
 async def call_llm(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Call LLM API."""
@@ -86,6 +80,14 @@ async def call_llm(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
 async def chat_completions(request: Request):
     body = await request.json()
     messages = body.get("messages", [])
+
+    # Extract system prompt from request (first message with role="system")
+    system_prompt = "You are a code assistant."
+    for m in messages:
+        if m.get("role") == "system":
+            system_prompt = m.get("content", system_prompt)
+            break
+
     user_msg = ""
     for m in reversed(messages):
         if m.get("role") == "user":
@@ -108,7 +110,7 @@ async def chat_completions(request: Request):
             logger.info("LLM context is empty (no data found)")
 
     new_messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
     ]
 
     if context_text:
@@ -117,7 +119,8 @@ async def chat_completions(request: Request):
             "content": "Repository context:\n" + context_text,
         })
 
-    new_messages.extend(messages)
+    # Add non-system messages from original request
+    new_messages.extend([m for m in messages if m.get("role") != "system"])
 
     resp = await call_llm(new_messages)
     return JSONResponse(resp)
