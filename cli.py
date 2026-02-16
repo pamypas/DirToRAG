@@ -135,7 +135,7 @@ def init_database(table_name: str) -> None:
                     FROM {table_name}
                     WHERE fts @@ websearch_to_tsquery(query_text)
                     ORDER BY rank_ix
-                    LIMIT least(match_count, 30) * 2
+                    LIMIT match_count * 2
                 ),
                 semantic AS (
                     SELECT
@@ -143,7 +143,7 @@ def init_database(table_name: str) -> None:
                         row_number() OVER (ORDER BY embedding <#> query_embedding) AS rank_ix
                     FROM {table_name}
                     ORDER BY rank_ix
-                    LIMIT least(match_count, 30) * 2
+                    LIMIT match_count * 2
                 )
                 SELECT t.*
                 FROM full_text
@@ -152,7 +152,7 @@ def init_database(table_name: str) -> None:
                 ORDER BY
                     coalesce(1.0 / (rrf_k + full_text.rank_ix), 0.0) * full_text_weight +
                     coalesce(1.0 / (rrf_k + semantic.rank_ix), 0.0) * semantic_weight DESC
-                LIMIT least(match_count, 30)
+                LIMIT match_count
                 $$;
             """)
 
