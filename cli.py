@@ -12,6 +12,7 @@ Usage:
 import argparse
 import logging
 import os
+import signal
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +32,22 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+# SIGINT handling for graceful interruption during indexing
+_interrupted = False
+
+
+def _signal_handler(signum, frame):
+    global _interrupted
+    if _interrupted:
+        logger.warning("Second interrupt received, forcing exit...")
+        sys.exit(1)
+    _interrupted = True
+    logger.info("Interrupt received. Finishing current file, then stopping...")
+
+
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
 
 # Disable system proxy
 for var in (
@@ -174,23 +191,33 @@ def iter_files(repo_path: Path) -> List[Path]:
                 yield p
 
 
-def load_indexed_files(log_path: Path) -> Set[str]:
-    """Load set of already indexed file paths."""
+def load_indexed_files(log_path: Path) -> dict[str, float]:
+    """
+    Load indexed files log.
+    Returns dict: {rel_path: mtime_timestamp}
+    mtime=0 means "indexed before mtime tracking was added".
+    """
     if not log_path.exists():
-        return set()
-    indexed: Set[str] = set()
+        return {}
+    indexed: dict[str, float] = {}
     with log_path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line:
-                indexed.add(line)
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) == 2:
+                indexed[parts[0]] = float(parts[1])
+            else:
+                # Old format (path only, no mtime)
+                indexed[parts[0]] = 0.0
     return indexed
 
 
-def append_indexed_file(log_path: Path, rel_path: str) -> None:
-    """Append a file path to the indexed log."""
+def append_indexed_file(log_path: Path, rel_path: str, mtime: float) -> None:
+    """Append a file path with mtime to the indexed log."""
     with log_path.open("a", encoding="utf-8") as f:
-        f.write(rel_path + "\n")
+        f.write(f"{rel_path}\t{mtime}\n")
 
 
 def insert_to_postgres(records: List[Dict[str, Any]], conn_str: str, table_name: str) -> None:
@@ -215,8 +242,49 @@ def insert_to_postgres(records: List[Dict[str, Any]], conn_str: str, table_name:
         conn.commit()
 
 
-def index_directory(table_name: str, directory: str, dry_run: bool = False) -> None:
-    """Index a directory into the database table."""
+def delete_chunks_for_file(
+    conn_str: str, table_name: str, rel_path: str
+) -> int:
+    """
+    Delete all chunks for a given file path.
+    Returns number of deleted rows.
+    """
+    with psycopg.connect(conn_str) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {table_name} WHERE metadata->>'path' = %s",
+                (rel_path,),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+    return deleted
+
+
+def _rewrite_indexed_log(log_path: Path, entries: dict[str, float]) -> None:
+    """Rewrite the indexed files log with current entries."""
+    tmp_path = log_path.with_suffix(".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        for path, mtime in sorted(entries.items()):
+            f.write(f"{path}\t{mtime}\n")
+    tmp_path.replace(log_path)
+
+
+def index_directory(
+    table_name: str,
+    directory: str,
+    dry_run: bool = False,
+    incremental: bool = False,
+) -> None:
+    """
+    Index a directory into the database table.
+
+    Args:
+        table_name: Name of the DB table
+        directory: Path to directory to index
+        dry_run: If True, print chunks without writing to DB
+        incremental: If True, detect changed files (by mtime) and reindex only those.
+                     Delete chunks for files that no longer exist on disk.
+    """
     repo_path = Path(directory).resolve()
     if not repo_path.is_dir():
         logger.error(f"Directory not found: {repo_path}")
@@ -225,51 +293,96 @@ def index_directory(table_name: str, directory: str, dry_run: bool = False) -> N
     log_path = repo_path / INDEXED_LOG_FILENAME
     conn_str = get_postgres_connection_string() if not dry_run else ""
 
-    # Get embedding config
     batch_size, concurrency = get_embedding_config()
 
-    # Load already indexed files
-    indexed_files_set = load_indexed_files(log_path)
+    indexed_files = load_indexed_files(log_path)
 
-    # Count total files
     all_files = list(iter_files(repo_path))
     total_files = len(all_files)
     if total_files == 0:
         logger.info("No files to index")
         return
 
-    indexed_files = 0
-    last_progress = -1
+    current_file_paths: set[str] = set()
 
-    # Thread pool for embedding requests
-    executor = ThreadPoolExecutor(max_workers=concurrency)
+    files_to_index: list[tuple[Path, str, bool]] = []
 
     for fpath in all_files:
         rel_path = str(fpath.relative_to(repo_path))
+        current_file_paths.add(rel_path)
 
-        # Skip already indexed files (unless dry-run)
-        if not dry_run and rel_path in indexed_files_set:
-            continue
+        current_mtime = fpath.stat().st_mtime
+
+        if rel_path not in indexed_files:
+            # New file
+            files_to_index.append((fpath, rel_path, False))
+        elif incremental:
+            indexed_mtime = indexed_files[rel_path]
+            if indexed_mtime == 0.0 or abs(current_mtime - indexed_mtime) > 1.0:
+                # File changed (1 second tolerance for filesystem resolution)
+                files_to_index.append((fpath, rel_path, True))
+        # If not incremental, skip already-indexed files
+
+    # Detect deleted files (only in incremental mode)
+    deleted_files: list[str] = []
+    if incremental and not dry_run:
+        deleted_files = [
+            path for path in indexed_files if path not in current_file_paths
+        ]
+        for rel_path in deleted_files:
+            n = delete_chunks_for_file(conn_str, table_name, rel_path)
+            logger.info("Deleted %d chunks for removed file: %s", n, rel_path)
+        _rewrite_indexed_log(log_path, {
+            k: v for k, v in indexed_files.items()
+            if k in current_file_paths
+        })
+
+    if not files_to_index and not deleted_files:
+        logger.info("No files to index (everything up to date)")
+        return
+
+    changed_count = sum(1 for _, _, changed in files_to_index if changed)
+    new_count = len(files_to_index) - changed_count
+    logger.info(
+        "Files to index: %d (%d new, %d changed)",
+        len(files_to_index), new_count, changed_count,
+    )
+
+    executor = ThreadPoolExecutor(max_workers=concurrency)
+
+    indexed_count = 0
+    last_progress = -1
+
+    for fpath, rel_path, is_changed in files_to_index:
+        if _interrupted:
+            logger.info("Indexing interrupted by user")
+            break
+
+        # Delete old chunks if file changed
+        if is_changed and not dry_run:
+            n = delete_chunks_for_file(conn_str, table_name, rel_path)
+            if n > 0:
+                logger.debug("Deleted %d old chunks for: %s", n, rel_path)
 
         try:
             text = fpath.read_text(encoding="utf-8", errors="ignore")
         except Exception as e:
-            logger.warning(f"Failed to read {rel_path}: {e}")
+            logger.warning("Failed to read %s: %s", rel_path, e)
             continue
 
         chunks = chunk_text(text)
 
         if not chunks:
             if not dry_run:
-                append_indexed_file(log_path, rel_path)
-                indexed_files += 1
+                append_indexed_file(
+                    log_path, rel_path, fpath.stat().st_mtime
+                )
+                indexed_count += 1
             continue
 
-        # Split into batches for parallel processing
         batches = [chunks[i:i + batch_size]
                    for i in range(0, len(chunks), batch_size)]
 
-        # Send requests in parallel
         futures = [executor.submit(get_embeddings, batch) for batch in batches]
 
         all_embs = []
@@ -279,21 +392,24 @@ def index_directory(table_name: str, directory: str, dry_run: bool = False) -> N
                 batch_embs = future.result()
                 all_embs.extend(batch_embs)
             except Exception as e:
-                logger.error(f"Error processing {rel_path}: {e}")
+                logger.error("Error processing %s: %s", rel_path, e)
                 file_failed = True
                 break
 
         if file_failed:
             continue
 
-        # Adjust chunks if embeddings are fewer
         if len(all_embs) < len(chunks):
             chunks = chunks[:len(all_embs)]
 
         if not all_embs:
+            if not dry_run:
+                append_indexed_file(
+                    log_path, rel_path, fpath.stat().st_mtime
+                )
+                indexed_count += 1
             continue
 
-        # Dry-run mode: print to console
         if dry_run:
             print(f"\n{'=' * 20} FILE: {rel_path} {'=' * 20}")
             for i, (chunk, emb) in enumerate(zip(chunks, all_embs)):
@@ -304,7 +420,6 @@ def index_directory(table_name: str, directory: str, dry_run: bool = False) -> N
                 print(f"Vector size: {len(emb)}")
             continue
 
-        # Prepare records for insertion
         records_to_insert = [
             {
                 "content": chunk,
@@ -314,33 +429,44 @@ def index_directory(table_name: str, directory: str, dry_run: bool = False) -> N
             for chunk, emb in zip(chunks, all_embs)
         ]
 
-        # Insert with retries
         max_retries = 3
+        inserted = False
         for attempt in range(max_retries):
             try:
                 insert_to_postgres(records_to_insert, conn_str, table_name)
+                inserted = True
                 break
             except Exception as e:
-                logger.error(f"Insert error (attempt {attempt + 1}/{max_retries}): {e}")
+                logger.error(
+                    "Insert error (attempt %d/%d): %s",
+                    attempt + 1, max_retries, e,
+                )
                 if attempt < max_retries - 1:
                     time.sleep(2)
-                else:
-                    logger.error(f"Failed to insert {rel_path} after {max_retries} attempts")
-                    continue
 
-        # Mark as indexed
-        append_indexed_file(log_path, rel_path)
-        indexed_files_set.add(rel_path)
-        indexed_files += 1
+        if not inserted:
+            logger.error(
+                "Failed to insert %s after %d attempts", rel_path, max_retries
+            )
+            continue
 
-        # Progress
-        progress = int(indexed_files * 100 / total_files)
+        append_indexed_file(log_path, rel_path, fpath.stat().st_mtime)
+        indexed_count += 1
+
+        total = len(files_to_index)
+        progress = int(indexed_count * 100 / total)
         if progress != last_progress:
-            logger.info(f"Progress: {progress}% ({indexed_files}/{total_files} files)")
+            logger.info(
+                "Progress: %d%% (%d/%d files)", progress, indexed_count, total,
+            )
             last_progress = progress
 
     executor.shutdown(wait=True)
-    logger.info(f"Indexing finished: {indexed_files}/{total_files} files processed")
+    logger.info(
+        "Indexing finished: %d/%d files processed", indexed_count, len(files_to_index),
+    )
+    if deleted_files:
+        logger.info("Deleted chunks for %d removed files", len(deleted_files))
 
 
 def run_server(table_name: str) -> None:
@@ -391,6 +517,12 @@ Examples:
     index_parser.add_argument("directory", help="Directory to index")
     index_parser.add_argument("--dry-run", action="store_true",
                               help="Print chunks without writing to DB")
+    index_parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Detect changed files by mtime and reindex only those. "
+             "Delete chunks for files that no longer exist.",
+    )
 
     # Serve command
     serve_parser = subparsers.add_parser("serve", help="Start the LLM server")
@@ -401,7 +533,12 @@ Examples:
     if args.command == "init":
         init_database(args.table)
     elif args.command == "index":
-        index_directory(args.table, args.directory, args.dry_run)
+        index_directory(
+            args.table,
+            args.directory,
+            args.dry_run,
+            incremental=args.incremental,
+        )
     elif args.command == "serve":
         run_server(args.table)
     else:

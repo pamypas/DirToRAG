@@ -111,6 +111,45 @@ class PostgresSearchAgent:
 
         return data[0] if isinstance(data, list) else []
 
+    def search_raw(self, user_message: str, limit: int | None = None) -> list[dict]:
+        """
+        Execute hybrid search and return raw results.
+        Unlike build_context(), returns structured data instead of a formatted string.
+        """
+        try:
+            query_embedding = self._get_embedding(user_message)
+            if not query_embedding:
+                logger.warning("Empty embedding received")
+                return []
+
+            if len(query_embedding) != 1024:
+                logger.warning(f"Embedding size {len(query_embedding)} != 1024")
+
+            table_name = self._get_table_name()
+            func_name = f"hybrid_search_{table_name}"
+            conn_str = get_db_connection_string()
+            embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+
+            search_limit = limit if limit is not None else self.limit
+
+            with psycopg.connect(conn_str, row_factory=dict_row) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT * FROM {func_name}(%s, %s::extensions.vector, %s, %s, %s)",
+                        (
+                            user_message,
+                            embedding_str,
+                            search_limit,
+                            self.full_text_weight,
+                            self.semantic_weight,
+                        ),
+                    )
+                    return cur.fetchall()
+
+        except Exception as e:
+            logger.exception("PostgresSearchAgent.search_raw failed: %s", e)
+            return []
+
     def build_context(self, user_message: str) -> str:
         """
         Build context for LLM based on hybrid search.
