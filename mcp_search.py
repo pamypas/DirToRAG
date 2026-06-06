@@ -21,6 +21,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Force unbuffered stdout — required for MCP stdio transport (stdout is a pipe, not a tty)
+sys.stdout.reconfigure(line_buffering=True)
+
 # Disable system proxies (as in server.py and cli.py)
 for var in (
     "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
