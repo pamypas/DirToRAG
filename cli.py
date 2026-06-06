@@ -33,22 +33,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# SIGINT handling for graceful interruption during indexing
-_interrupted = False
-
-
-def _signal_handler(signum, frame):
-    global _interrupted
-    if _interrupted:
-        logger.warning("Second interrupt received, forcing exit...")
-        sys.exit(1)
-    _interrupted = True
-    logger.info("Interrupt received. Finishing current file, then stopping...")
-
-
-signal.signal(signal.SIGINT, _signal_handler)
-signal.signal(signal.SIGTERM, _signal_handler)
-
 # Disable system proxy
 for var in (
     "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
@@ -290,6 +274,20 @@ def index_directory(
         logger.error(f"Directory not found: {repo_path}")
         sys.exit(1)
 
+    # SIGINT/SIGTERM handling for graceful interruption
+    _interrupted = False
+
+    def _signal_handler(signum, frame):
+        nonlocal _interrupted
+        if _interrupted:
+            logger.warning("Second interrupt received, forcing exit...")
+            sys.exit(1)
+        _interrupted = True
+        logger.info("Interrupt received. Finishing current file, then stopping...")
+
+    prev_sigint = signal.signal(signal.SIGINT, _signal_handler)
+    prev_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
+
     log_path = repo_path / INDEXED_LOG_FILENAME
     conn_str = get_postgres_connection_string() if not dry_run else ""
 
@@ -301,6 +299,8 @@ def index_directory(
     total_files = len(all_files)
     if total_files == 0:
         logger.info("No files to index")
+        signal.signal(signal.SIGINT, prev_sigint)
+        signal.signal(signal.SIGTERM, prev_sigterm)
         return
 
     current_file_paths: set[str] = set()
@@ -339,6 +339,8 @@ def index_directory(
 
     if not files_to_index and not deleted_files:
         logger.info("No files to index (everything up to date)")
+        signal.signal(signal.SIGINT, prev_sigint)
+        signal.signal(signal.SIGTERM, prev_sigterm)
         return
 
     changed_count = sum(1 for _, _, changed in files_to_index if changed)
@@ -467,6 +469,9 @@ def index_directory(
     )
     if deleted_files:
         logger.info("Deleted chunks for %d removed files", len(deleted_files))
+
+    signal.signal(signal.SIGINT, prev_sigint)
+    signal.signal(signal.SIGTERM, prev_sigterm)
 
 
 def run_server(table_name: str) -> None:

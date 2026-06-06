@@ -7,3 +7,4 @@ pyyaml
 tiktoken
 psycopg[binary]
 mcp[cli]>=1.0.0
+watchdog
