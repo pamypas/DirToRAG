@@ -112,6 +112,41 @@ claude mcp add -e DIRTORAG_TABLE=work --transport stdio rag -- \
 
 Это подключит **только MCP-сервер** (инструменты `search_codebase`, `get_index_stats`, `get_debug_info`).
 
+`config.yaml` находится автоматически (путь вычисляется от `models_loader.py`, не от CWD). Если нужно переопределить настройки или работать без `config.yaml` — все значения можно задать через env vars в `-e`:
+
+```bash
+claude mcp add \
+  -e DIRTORAG_TABLE=work \
+  -e DIRTORAG_EMBEDDING_API_BASE=http://localhost:11434 \
+  -e DIRTORAG_EMBEDDING_MODEL=bge-m3 \
+  -e DIRTORAG_DB_HOST=localhost \
+  -e DIRTORAG_DB_PORT=5432 \
+  -e DIRTORAG_DB_NAME=dirtoRAG \
+  -e DIRTORAG_DB_USER=postgres \
+  --transport stdio rag -- \
+  /Users/an.belyaev/Tools/DirToRAG/venv/bin/python \
+  /Users/an.belyaev/Tools/DirToRAG/mcp_search.py work /Users/an.belyaev/Work
+```
+
+**Полный список env vars:**
+
+| Переменная | Секция config.yaml | По умолчанию |
+|---|---|---|
+| `DIRTORAG_TABLE` | — | `documents` |
+| `DIRTORAG_WATCH_DIR` | — | нет (вотчер выключен) |
+| `DIRTORAG_EMBEDDING_API_BASE` | `embedding.api_base` | из config.yaml |
+| `DIRTORAG_EMBEDDING_MODEL` | `embedding.model` | из config.yaml |
+| `DIRTORAG_EMBEDDING_API_KEY` | `embedding.api_key` | `key` |
+| `DIRTORAG_DB_HOST` | `database.host` | `localhost` |
+| `DIRTORAG_DB_PORT` | `database.port` | `5432` |
+| `DIRTORAG_DB_NAME` | `database.name` | `dirtoRAG` |
+| `DIRTORAG_DB_USER` | `database.user` | `postgres` |
+| `DIRTORAG_DB_PASSWORD` | `database.password` | пусто |
+| `DIRTORAG_CHUNK_SIZE` | `chunker.max_chunk_size` | `1024` |
+| `DIRTORAG_CHUNK_OVERLAP` | `chunker.overlap` | `256` |
+| `DIRTORAG_LLM_API_BASE` | `llm.api_base` | из config.yaml |
+| `DIRTORAG_LLM_MODEL` | `llm.model` | из config.yaml |
+
 **Хук нужно добавить отдельно** — см. секцию ниже.
 
 ---
