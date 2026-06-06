@@ -325,6 +325,110 @@ def get_index_stats() -> dict[str, Any]:
         return {"error": str(e)}
 
 
+@mcp.tool()
+def get_debug_info() -> dict[str, Any]:
+    """
+    Get detailed debug information about the indexed codebase and database.
+
+    Returns:
+        Dictionary with:
+        - table_name: Search table name
+        - total_chunks, total_files, embedding_model
+        - db_size_mb: Total PostgreSQL database size on disk
+        - table_size_mb: Search table size (data + indexes)
+        - index_size_mb: Size of all indexes on the search table
+        - chunks_per_extension: Breakdown of chunk count by file extension
+        - avg_chunks_per_file: Average number of chunks per file
+        - max_chunks_per_file: Path and count of the file with most chunks
+        - embedding_dim: Actual embedding vector dimension from the DB
+    """
+    import psycopg
+
+    table_name = get_search_table()
+    if table_name == "documents":
+        table_name = DEFAULT_TABLE
+
+    conn_str = get_db_connection_string()
+    result: dict[str, Any] = {"table_name": table_name}
+
+    try:
+        with psycopg.connect(conn_str) as conn:
+            with conn.cursor() as cur:
+                # Total chunks
+                cur.execute(f"SELECT COUNT(*) FROM {table_name}")
+                result["total_chunks"] = cur.fetchone()[0]
+
+                # Total files
+                cur.execute(
+                    f"SELECT COUNT(DISTINCT metadata->>'path') FROM {table_name}"
+                )
+                result["total_files"] = cur.fetchone()[0]
+
+                # DB size
+                cur.execute(
+                    "SELECT pg_database_size(current_database()) / (1024*1024.0)"
+                )
+                result["db_size_mb"] = round(cur.fetchone()[0], 2)
+
+                # Table size (data)
+                cur.execute(
+                    f"SELECT pg_table_size('{table_name}') / (1024*1024.0)"
+                )
+                result["table_size_mb"] = round(cur.fetchone()[0], 2)
+
+                # Index size
+                cur.execute(
+                    f"SELECT pg_indexes_size('{table_name}') / (1024*1024.0)"
+                )
+                result["index_size_mb"] = round(cur.fetchone()[0], 2)
+
+                # Chunks per extension
+                cur.execute(f"""
+                    SELECT
+                        split_part(metadata->>'path', '.', -1) AS ext,
+                        COUNT(*) AS cnt
+                    FROM {table_name}
+                    GROUP BY ext
+                    ORDER BY cnt DESC
+                """)
+                result["chunks_per_extension"] = {
+                    f".{row[0]}": row[1] for row in cur.fetchall()
+                }
+
+                # Average chunks per file
+                cur.execute(f"""
+                    SELECT AVG(cnt)::numeric(10,2), MAX(cnt), MAX(path)
+                    FROM (
+                        SELECT metadata->>'path' AS path, COUNT(*) AS cnt
+                        FROM {table_name}
+                        GROUP BY metadata->>'path'
+                    ) sub
+                """)
+                row = cur.fetchone()
+                result["avg_chunks_per_file"] = float(row[0]) if row[0] else 0
+                result["max_chunks_per_file"] = {
+                    "path": row[2] or "N/A",
+                    "chunks": row[1] or 0,
+                }
+
+                # Embedding dimension (from actual vectors in the table)
+                cur.execute(
+                    f"SELECT extensions.vector_dims(embedding) FROM {table_name} "
+                    "WHERE embedding IS NOT NULL LIMIT 1"
+                )
+                row = cur.fetchone()
+                result["embedding_dim"] = row[0] if row else "unknown"
+
+        cfg = load_app_config()
+        result["embedding_model"] = cfg.get("embedding", {}).get("model", "unknown")
+
+        return result
+
+    except Exception as e:
+        logger.exception("Debug info failed: %s", e)
+        return {"error": str(e)}
+
+
 def main():
     """Entry point for MCP server."""
     if len(sys.argv) > 1:
