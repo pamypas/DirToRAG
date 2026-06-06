@@ -137,15 +137,13 @@ async def chat_completions(request: Request):
         else:
             logger.info("LLM context is empty (no data found)")
 
-    new_messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-    ]
-
+    system_content = system_prompt
     if context_text:
-        new_messages.append({
-            "role": "system",
-            "content": "Repository context:\n" + context_text,
-        })
+        system_content += "\n\nRepository context:\n" + context_text
+
+    new_messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": system_content},
+    ]
 
     # Add non-system messages from original request
     new_messages.extend([m for m in messages if m.get("role") != "system"])
