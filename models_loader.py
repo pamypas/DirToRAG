@@ -22,13 +22,18 @@ def load_app_config(path: str | None = None) -> Dict[str, Any]:
     """
     Load application config from YAML file, with env var overrides.
 
-    Looks for config.yaml in the same directory as this file, or at `path` if given.
-    If config.yaml is missing, falls back to env vars entirely (needed for MCP spawn).
+    Config path priority:
+    1. DIRTORAG_CONFIG env var
+    2. `path` argument
+    3. config.yaml next to this file (fallback)
     """
-    if path is None:
-        config_path = _DEFAULT_CONFIG_PATH
-    else:
+    env_config = os.environ.get("DIRTORAG_CONFIG")
+    if env_config:
+        config_path = Path(env_config)
+    elif path is not None:
         config_path = Path(path)
+    else:
+        config_path = _DEFAULT_CONFIG_PATH
 
     data: Dict[str, Any] = {}
     if config_path.is_file():
@@ -108,6 +113,19 @@ def load_app_config(path: str | None = None) -> Dict[str, Any]:
     # Preserve server section
     if "server" not in data:
         data["server"] = {}
+
+    # --- Dashboard ---
+    dash_cfg = data.get("dashboard") or {}
+    auto_open_raw = _env_or(dash_cfg.get("auto_open"), "DIRTORAG_DASHBOARD_AUTO_OPEN", "true")
+    if isinstance(auto_open_raw, bool):
+        auto_open_val = auto_open_raw
+    else:
+        auto_open_val = str(auto_open_raw).lower() in ("true", "1", "yes")
+    data["dashboard"] = {
+        "host": _env_or(dash_cfg.get("host"), "DIRTORAG_DASHBOARD_HOST", "127.0.0.1"),
+        "port": int(_env_or(dash_cfg.get("port"), "DIRTORAG_DASHBOARD_PORT", "8889")),
+        "auto_open": auto_open_val,
+    }
 
     return data
 

@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DirToRAG Dashboard</title>
+<style>
+:root {
+  --bg: #1a1a2e; --surface: #16213e; --surface2: #0f3460; --border: #2a2a4a;
+  --text: #e0e0e0; --text2: #a0a0b0; --accent: #4fc3f7; --green: #66bb6a;
+  --red: #ef5350; --orange: #ffa726; --yellow: #ffee58;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+a { color: var(--accent); }
+
+header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 20px; }
+header h1 { font-size: 18px; font-weight: 600; }
+header .db-status { margin-left: auto; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+header .db-status .dot { width: 8px; height: 8px; border-radius: 50%; }
+header .db-status .dot.ok { background: var(--green); }
+header .db-status .dot.err { background: var(--red); }
+
+nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; gap: 0; }
+nav button { background: none; border: none; border-bottom: 2px solid transparent; color: var(--text2); padding: 10px 20px; cursor: pointer; font-size: 14px; }
+nav button:hover { color: var(--text); }
+nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+main { padding: 24px; max-width: 1200px; margin: 0 auto; }
+.tab { display: none; }
+.tab.active { display: block; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+.card h2 { font-size: 16px; margin-bottom: 12px; color: var(--accent); }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.stat { background: var(--surface2); border-radius: 6px; padding: 14px; text-align: center; }
+.stat .value { font-size: 28px; font-weight: 700; color: var(--accent); }
+.stat .label { font-size: 12px; color: var(--text2); margin-top: 4px; }
+
+.btn { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 8px 18px; cursor: pointer; font-size: 13px; transition: background .15s; }
+.btn:hover { background: var(--accent); color: #000; }
+.btn.danger { border-color: var(--red); }
+.btn.danger:hover { background: var(--red); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn.primary { background: var(--accent); color: #000; border-color: var(--accent); }
+
+.progress-bar { background: var(--surface2); border-radius: 4px; height: 20px; overflow: hidden; margin: 8px 0; }
+.progress-bar .fill { background: var(--accent); height: 100%; transition: width .3s; }
+.progress-bar .label { position: relative; top: -18px; text-align: center; font-size: 11px; line-height: 20px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+th { color: var(--text2); font-weight: 500; position: sticky; top: 0; background: var(--surface); }
+tr:hover td { background: var(--surface2); }
+td .btn { padding: 4px 10px; font-size: 11px; }
+
+.log-container { background: #0d1117; border-radius: 6px; padding: 12px; max-height: 500px; overflow-y: auto; font-family: 'Menlo', 'Consolas', monospace; font-size: 12px; line-height: 1.6; }
+.log-entry { white-space: pre-wrap; word-break: break-all; }
+.log-entry.INFO { color: var(--text); }
+.log-entry.WARNING { color: var(--orange); }
+.log-entry.ERROR { color: var(--red); }
+.log-entry.DEBUG { color: var(--text2); }
+
+.search-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.search-row .query { flex: 1; font-family: monospace; }
+.search-row .count { color: var(--text2); font-size: 12px; }
+
+.pagination { display: flex; gap: 8px; align-items: center; justify-content: center; margin-top: 12px; }
+.pagination .btn { padding: 4px 12px; }
+
+.files-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.files-header input { background: var(--surface2); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 6px 12px; font-size: 13px; flex: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>DirToRAG</h1>
+  <span id="project-name"></span>
+  <div class="db-status">
+    <div class="dot" id="db-dot"></div>
+    <span id="db-label">connecting...</span>
+  </div>
+</header>
+
+<nav>
+  <button class="active" onclick="showTab('overview')">Overview</button>
+  <button onclick="showTab('files')">Files</button>
+  <button onclick="showTab('logs')">Logs</button>
+  <button onclick="showTab('searches')">Searches</button>
+  <button onclick="showTab('projects')">Projects</button>
+</nav>
+
+<main>
+  <!-- Overview Tab -->
+  <div class="tab active" id="tab-overview">
+    <div class="grid" id="stats-grid"></div>
+
+    <div class="card" id="debug-card" style="display:none">
+      <h2>Database Statistics</h2>
+      <div class="grid" id="debug-grid"></div>
+      <div id="extensions-list" style="margin-top:12px;"></div>
+    </div>
+
+    <div class="card" id="indexing-card">
+      <h2>Indexing</h2>
+      <div style="display:flex;gap:10px;margin-bottom:12px;">
+        <button class="btn" id="btn-reindex-changed" onclick="doReindex('changed')">Reindex Changed</button>
+        <button class="btn danger" id="btn-reindex-all" onclick="doReindex('all')">Reindex All</button>
+        <button class="btn" id="btn-pause" onclick="doPause()">Pause</button>
+        <button class="btn" id="btn-resume" onclick="doResume()" style="display:none">Resume</button>
+      </div>
+      <div class="progress-bar" id="progress-bar" style="display:none">
+        <div class="fill" id="progress-fill" style="width:0%"></div>
+        <div class="label" id="progress-label">0%</div>
+      </div>
+      <div id="indexing-status" style="color:var(--text2);font-size:13px;"></div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+        <h2 style="margin:0">Activity Log</h2>
+        <button class="btn" onclick="clearLogs()" style="margin-left:auto;font-size:11px;">Clear</button>
+        <label style="font-size:12px;color:var(--text2)"><input type="checkbox" id="log-autoscroll" checked> Auto-scroll</label>
+      </div>
+      <div class="log-container" id="log-container" style="max-height:300px;"></div>
+    </div>
+  </div>
+
+  <!-- Files Tab -->
+  <div class="tab" id="tab-files">
+    <div class="card">
+      <div class="files-header">
+        <input type="text" id="files-search" placeholder="Search files..." oninput="loadFiles()">
+        <select id="files-status" onchange="loadFiles()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:6px;border-radius:4px;">
+          <option value="">All statuses</option>
+          <option value="indexed">Indexed</option>
+          <option value="empty">Empty</option>
+          <option value="failed">Failed</option>
+        </select>
+      </div>
+      <table>
+        <thead><tr><th>Path</th><th>Chunks</th><th>Size</th><th>Status</th><th>Indexed</th><th></th></tr></thead>
+        <tbody id="files-tbody"></tbody>
+      </table>
+      <div class="pagination">
+        <button class="btn" onclick="filesPrev()">Prev</button>
+        <span id="files-page-info">0 / 0</span>
+        <button class="btn" onclick="filesNext()">Next</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Logs Tab -->
+  <div class="tab" id="tab-logs">
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+        <h2 style="margin:0">Full Activity Log</h2>
+        <button class="btn" onclick="clearLogs()" style="margin-left:auto;font-size:11px;">Clear</button>
+        <label style="font-size:12px;color:var(--text2)"><input type="checkbox" id="log-autoscroll-full" checked> Auto-scroll</label>
+      </div>
+      <div class="log-container" id="log-container-full"></div>
+    </div>
+  </div>
+
+  <!-- Searches Tab -->
+  <div class="tab" id="tab-searches">
+    <div class="card">
+      <h2>Search History</h2>
+      <div id="searches-list"></div>
+    </div>
+  </div>
+
+  <!-- Projects Tab -->
+  <div class="tab" id="tab-projects">
+    <div class="card">
+      <h2>All Projects</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Table</th><th>Path</th><th>Last Indexed</th><th>Paused</th></tr></thead>
+        <tbody id="projects-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<script>
+let state = {};
+let filesOffset = 0;
+const FILES_LIMIT = 50;
+let ws = null;
+
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'files') loadFiles();
+  if (name === 'searches') loadSearches();
+  if (name === 'projects') loadProjects();
+}
+
+async function fetchState() {
+  try {
+    const r = await fetch('/api/state');
+    if (!r.ok) throw new Error(r.status);
+    state = await r.json();
+    updateUI();
+    document.getElementById('db-dot').className = 'dot ok';
+    document.getElementById('db-label').textContent = 'DB connected';
+  } catch(e) {
+    document.getElementById('db-dot').className = 'dot err';
+    document.getElementById('db-label').textContent = 'connecting...';
+  }
+}
+
+function updateUI() {
+  document.getElementById('project-name').textContent = state.project?.name || '';
+
+  const grid = document.getElementById('stats-grid');
+  const s = state.stats || {};
+  grid.innerHTML = `
+    <div class="stat"><div class="value">${s.total_files || 0}</div><div class="label">Files</div></div>
+    <div class="stat"><div class="value">${s.total_chunks || 0}</div><div class="label">Chunks</div></div>
+    <div class="stat"><div class="value">${s.table_size_mb || 0}</div><div class="label">Table MB</div></div>
+    <div class="stat"><div class="value">${s.db_size_mb || 0}</div><div class="label">DB MB</div></div>
+  `;
+
+  const debugCard = document.getElementById('debug-card');
+  const debugGrid = document.getElementById('debug-grid');
+  if (s.total_chunks > 0) {
+    debugCard.style.display = 'block';
+    const maxFile = s.max_chunks_per_file || {};
+    debugGrid.innerHTML = `
+      <div class="stat"><div class="value">${s.index_size_mb || 0}</div><div class="label">Index MB</div></div>
+      <div class="stat"><div class="value">${s.avg_chunks_per_file || 0}</div><div class="label">Avg chunks/file</div></div>
+      <div class="stat"><div class="value">${s.embedding_dim || '-'}</div><div class="label">Embedding dim</div></div>
+      <div class="stat"><div class="value" style="font-size:14px">${maxFile.chunks || 0}</div><div class="label">Max chunks (${maxFile.path || '-'})</div></div>
+    `;
+    const ext = s.chunks_per_extension || {};
+    if (Object.keys(ext).length > 0) {
+      const sorted = Object.entries(ext).sort((a,b) => b[1] - a[1]);
+      document.getElementById('extensions-list').innerHTML =
+        '<div style="font-size:12px;color:var(--text2);margin-bottom:6px;">Chunks per extension:</div>' +
+        sorted.map(([k,v]) => `<span style="display:inline-block;background:var(--surface2);border-radius:4px;padding:2px 8px;margin:2px;font-size:12px;">${escHtml(k)} <b>${v}</b></span>`).join('');
+    }
+  } else {
+    debugCard.style.display = 'none';
+  }
+
+  const initCard = document.getElementById('init-card');
+  const indexingCard = document.getElementById('indexing-card');
+  if (!state.table_exists) {
+    if (initCard) initCard.style.display = 'none';
+    indexingCard.style.display = 'block';
+  } else {
+    if (initCard) initCard.style.display = 'none';
+    indexingCard.style.display = 'block';
+  }
+
+  const idx = state.indexing || {};
+  const progressBar = document.getElementById('progress-bar');
+  const progressFill = document.getElementById('progress-fill');
+  const progressLabel = document.getElementById('progress-label');
+
+  if (idx.running) {
+    progressBar.style.display = 'block';
+    progressFill.style.width = idx.percent + '%';
+    progressLabel.textContent = idx.percent + '% (' + idx.done + '/' + idx.total + ') ' + (idx.current_file || '');
+    document.getElementById('btn-reindex-changed').disabled = true;
+    document.getElementById('btn-reindex-all').disabled = true;
+  } else {
+    progressBar.style.display = 'none';
+    document.getElementById('btn-reindex-changed').disabled = false;
+    document.getElementById('btn-reindex-all').disabled = false;
+  }
+
+  document.getElementById('btn-pause').style.display = state.indexing_paused ? 'none' : 'inline-block';
+  document.getElementById('btn-resume').style.display = state.indexing_paused ? 'inline-block' : 'none';
+  document.getElementById('indexing-status').textContent = state.indexing_paused ? 'Indexing paused' : '';
+}
+
+async function doReindex(scope) {
+  await fetch('/api/reindex', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({scope}) });
+}
+
+async function doPause() {
+  await fetch('/api/indexing/pause', { method: 'POST' });
+  await fetchState();
+}
+
+async function doResume() {
+  await fetch('/api/indexing/resume', { method: 'POST' });
+  await fetchState();
+}
+
+async function loadFiles() {
+  const search = document.getElementById('files-search').value;
+  const status = document.getElementById('files-status').value;
+  const r = await fetch(`/api/files?limit=${FILES_LIMIT}&offset=${filesOffset}&status=${status}&search=${encodeURIComponent(search)}`);
+  const data = await r.json();
+  const tbody = document.getElementById('files-tbody');
+  tbody.innerHTML = data.rows.map(f => `
+    <tr>
+      <td title="${f.rel_path}">${f.rel_path.length > 60 ? '...' + f.rel_path.slice(-57) : f.rel_path}</td>
+      <td>${f.chunk_count}</td>
+      <td>${formatSize(f.size_bytes)}</td>
+      <td style="color:${f.status === 'indexed' ? 'var(--green)' : f.status === 'failed' ? 'var(--red)' : 'var(--text2)'}">${f.status}</td>
+      <td style="color:var(--text2);font-size:11px">${f.indexed_at ? new Date(f.indexed_at).toLocaleString() : ''}</td>
+      <td><button class="btn" onclick="reindexFile('${f.rel_path.replace(/'/g, "\\'")}')">Reindex</button>
+          <button class="btn danger" onclick="deleteFile('${f.rel_path.replace(/'/g, "\\'")}')">Del</button></td>
+    </tr>
+  `).join('');
+  const totalPages = Math.ceil(data.total / FILES_LIMIT) || 1;
+  const currentPage = Math.floor(filesOffset / FILES_LIMIT) + 1;
+  document.getElementById('files-page-info').textContent = `${currentPage} / ${totalPages} (${data.total})`;
+}
+
+function filesPrev() { filesOffset = Math.max(0, filesOffset - FILES_LIMIT); loadFiles(); }
+function filesNext() { filesOffset += FILES_LIMIT; loadFiles(); }
+
+async function reindexFile(path) {
+  await fetch('/api/reindex', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({path}) });
+  loadFiles();
+}
+
+async function deleteFile(path) {
+  if (!confirm('Delete all chunks for ' + path + '?')) return;
+  await fetch('/api/files/' + encodeURIComponent(path), { method: 'DELETE' });
+  loadFiles();
+}
+
+async function loadSearches() {
+  const r = await fetch('/api/searches');
+  const searches = await r.json();
+  const list = document.getElementById('searches-list');
+  list.innerHTML = searches.length === 0
+    ? '<div style="color:var(--text2)">No searches yet</div>'
+    : searches.map(s => `
+      <div class="search-row">
+        <span class="query">${escHtml(s.query)}</span>
+        <span class="count">${s.n_results} results</span>
+        <span style="color:var(--text2);font-size:11px">${new Date(s.ts * 1000).toLocaleString()}</span>
+      </div>
+    `).join('');
+}
+
+async function loadProjects() {
+  const r = await fetch('/api/projects');
+  const projects = await r.json();
+  const tbody = document.getElementById('projects-tbody');
+  tbody.innerHTML = projects.map(p => `
+    <tr>
+      <td>${escHtml(p.project_name)}</td>
+      <td style="font-family:monospace;font-size:12px">${escHtml(p.table_name)}</td>
+      <td style="color:var(--text2);font-size:12px">${escHtml(p.project_path)}</td>
+      <td style="font-size:12px">${p.last_indexed_at ? new Date(p.last_indexed_at).toLocaleString() : 'never'}</td>
+      <td style="color:${p.indexing_paused ? 'var(--orange)' : 'var(--green)'}">${p.indexing_paused ? 'Yes' : 'No'}</td>
+    </tr>
+  `).join('');
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function clearLogs() {
+  document.getElementById('log-container').innerHTML = '';
+  document.getElementById('log-container-full').innerHTML = '';
+}
+
+function appendLog(entry) {
+  const containers = [
+    document.getElementById('log-container'),
+    document.getElementById('log-container-full'),
+  ];
+  for (const container of containers) {
+    const div = document.createElement('div');
+    div.className = 'log-entry ' + (entry.level || 'INFO');
+    const ts = entry.ts ? new Date(entry.ts * 1000).toLocaleTimeString() : '';
+    div.textContent = ts + ' ' + entry.message;
+    container.appendChild(div);
+    if (container.children.length > 500) container.removeChild(container.firstChild);
+    const scrollId = container.id === 'log-container' ? 'log-autoscroll' : 'log-autoscroll-full';
+    if (document.getElementById(scrollId)?.checked) container.scrollTop = container.scrollHeight;
+  }
+}
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(proto + '://' + location.host + '/ws/logs');
+  ws.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    if (data.type === 'ping') return;
+    appendLog(data);
+  };
+  ws.onclose = () => setTimeout(connectWS, 2000);
+  ws.onerror = () => ws.close();
+}
+
+// Init
+fetchState();
+setInterval(fetchState, 3000);
+connectWS();
+</script>
+</body>
+</html>
